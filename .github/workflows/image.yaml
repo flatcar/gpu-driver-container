@@ -1,0 +1,156 @@
+name: image
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - .github/workflows/image.yaml
+      - Makefile
+      - Dockerfile
+      - nvidia-driver
+      - empty
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      driver_versions:
+        description: Space-separated NVIDIA driver versions to build (empty = use DRIVER_VERSIONS from the Makefile)
+        required: false
+        default: ""
+      flatcar_versions:
+        description: Space-separated Flatcar VERSION_ID values (GPU Operator tag suffixes and precompiled builds)
+        required: false
+        default: "4593.2.0 4593.2.1 4593.2.2 4593.2.3"
+      build_precompiled:
+        description: Also build precompiled driver images for each driver/Flatcar combination
+        type: boolean
+        required: false
+        default: true
+      release:
+        description: Tag images without a dev prefix (e.g. 580.167.08-flatcar4593.2.0) for use with plain driver.version values
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CUDA_VERSION: 13.2.1
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/driver
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
+      driver_versions: ${{ steps.vars.outputs.driver_versions }}
+      flatcar_versions: ${{ steps.vars.outputs.flatcar_versions }}
+      flatcar_versions_plain: ${{ steps.vars.outputs.flatcar_versions_plain }}
+      build_precompiled: ${{ steps.vars.outputs.build_precompiled }}
+    steps:
+      - uses: actions/checkout@v6
+        name: Check out code
+
+      - name: Compute build matrix
+        id: vars
+        run: |
+          # Branch pushes build dev images with a unique commit-based prefix;
+          # GitHub Releases (or a manual dispatch with release=true) build clean tags
+          # (<driver_version>-flatcar<version_id>) matching the GPU Operator's default
+          # image reference scheme.
+          if [[ "${{ github.event_name }}" == "release" ]] || \
+             [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.release }}" == "true" ]]; then
+            echo "version=" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
+          fi
+          # Default to the driver versions maintained in the Makefile
+          DRIVERS=$(sed -nE 's/^DRIVER_VERSIONS \?= *//p' Makefile)
+          FLATCARS="4593.2.0 4593.2.1 4593.2.2 4593.2.3"
+          PRECOMPILED="true"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ -n "${{ inputs.driver_versions }}" ]]; then
+              DRIVERS="${{ inputs.driver_versions }}"
+            fi
+            FLATCARS="${{ inputs.flatcar_versions }}"
+            PRECOMPILED="${{ inputs.build_precompiled }}"
+          fi
+          echo "Driver versions: $DRIVERS"
+          echo "driver_versions=$(echo "$DRIVERS" | jq -R -c 'split(" ") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+          echo "flatcar_versions=$(echo "$FLATCARS" | jq -R -c 'split(" ") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+          echo "flatcar_versions_plain=$FLATCARS" >> "$GITHUB_OUTPUT"
+          echo "build_precompiled=$PRECOMPILED" >> "$GITHUB_OUTPUT"
+
+  flatcar:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        driver_version: ${{ fromJSON(needs.setup.outputs.driver_versions) }}
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        name: Check out code
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Flatcar driver image
+        run: |
+          VERSION="$VERSION" \
+          PUSH_ON_BUILD=true \
+          make build-${{ matrix.driver_version }}
+
+      - name: Tag image for GPU Operator Flatcar suffix
+        run: |
+          BASE_TAG="${VERSION:+${VERSION}-}${{ matrix.driver_version }}-flatcar"
+          for FLATCAR_VERSION in ${{ needs.setup.outputs.flatcar_versions_plain }}; do
+            docker buildx imagetools create \
+              -t "${IMAGE_NAME}:${BASE_TAG}-flatcar${FLATCAR_VERSION}" \
+              "${IMAGE_NAME}:${BASE_TAG}"
+          done
+
+  precompiled-flatcar:
+    needs: setup
+    if: needs.setup.outputs.build_precompiled == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        driver_version: ${{ fromJSON(needs.setup.outputs.driver_versions) }}
+        flatcar_version: ${{ fromJSON(needs.setup.outputs.flatcar_versions) }}
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        name: Check out code
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push precompiled Flatcar driver image
+        run: |
+          VERSION="$VERSION" \
+          FLATCAR_VERSION="${{ matrix.flatcar_version }}" \
+          PUSH_ON_BUILD=true \
+          make build-precompiled-${{ matrix.driver_version }}

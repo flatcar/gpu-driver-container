@@ -1,0 +1,552 @@
+#! /bin/bash
+# Copyright (c) 2018-2021, NVIDIA CORPORATION. All rights reserved.
+
+set -eu
+
+RUN_DIR=/run/nvidia
+PID_FILE=${RUN_DIR}/${0##*/}.pid
+DRIVER_VERSION=${DRIVER_VERSION:?"Missing driver version"}
+#NVIDIA_BINUITLS_DIR=/opt/nvidia/binutils
+#NVIDIA_KMODS_DIR=/opt/nvidia/${DRIVER_VERSION}
+GPU_DIRECT_RDMA_ENABLED=${GPU_DIRECT_RDMA_ENABLED:-false}
+CREATE_PRECOMPILED_PACKAGE=${CREATE_PRECOMPILED_PACKAGE:-false}
+
+
+OPEN_KERNEL_MODULES_ENABLED=${OPEN_KERNEL_MODULES_ENABLED:-false}
+[[ "${OPEN_KERNEL_MODULES_ENABLED}" == "true" ]] && KERNEL_TYPE=kernel-open || KERNEL_TYPE=kernel
+
+#export COREOS_RELEASE_CHANNEL=stable
+#COREOS_RELEASE_BOARD=amd64-usr
+#COREOS_ALL_RELEASES="https://www.flatcar-linux.org/releases-json/releases-${COREOS_RELEASE_CHANNEL}.json"
+
+export DEBIAN_FRONTEND=noninteractive
+
+_relocate_flatcar() {
+    set -euo pipefail
+
+    #shopt -s nullglob
+
+    hostlds=( /host-lib/usr/lib64/ld-linux-*.so.* )
+    if [[ ${#hostlds[@]} -eq 0 ]]; then
+        echo "** no dynamic loaders found"
+        return 1
+    fi
+    if [[ ${#hostlds[@]} -gt 1 ]]; then
+        echo "** more than one fitting dynamic loader found, picking first"
+    fi
+    hostld=${hostlds[0]}
+    echo "** Found host dynamic loader: ${hostld}"
+
+    kdirs=( /lib/modules/${KERNEL_VERSION}/build )
+    if [[ ${#kdirs[@]} -eq 0 ]]; then
+        echo "** no kernel module tools directories found"
+        return 1
+    fi
+    if [[ ${#kdirs[@]} -gt 1 ]]; then
+        echo "** more than one fitting kernel module tools directory found, picking first"
+    fi
+    kdir=${kdirs[0]}
+    echo "** Found kernel tools directory: ${kdir}"
+
+    tools=(
+        scripts/basic/fixdep
+        scripts/mod/modpost
+        tools/objtool/objtool
+    )
+
+    for tool in "${tools[@]}"; do
+        host_tool=${kdir}/${tool}
+        if [[ ! -f ${host_tool} ]]; then
+            echo "${tool@Q} not found in ${kdir@Q}, not patching"
+            continue
+        fi
+        echo "** Setting host dynamic loader for ${tool@Q}"
+        patchelf \
+            --set-interpreter "${hostld}" \
+            --set-rpath /host-lib/usr/lib64 \
+            "${host_tool}"
+    done
+}
+
+_is_flatcar() {
+    nsenter -t 1 -m grep -q 'ID=flatcar' /etc/os-release
+}
+
+# Check if the system is NVSwitch based (e.g. HGX/DGX A100, H100, H200).
+_assert_nvswitch_system() {
+    [ -d /proc/driver/nvidia-nvswitch/devices ] || return 1
+    if [ -z "$(ls -A /proc/driver/nvidia-nvswitch/devices)" ]; then
+        return 1
+    fi
+    return 0
+}
+
+
+_fetch_flatcar_modules() {
+    local versionid=${1-}
+    if [ -z "$versionid" ]; then
+      versionid=$(. /host-etc/os-release; echo $VERSION_ID)
+    fi
+    local channel=
+    local board=
+    case "$versionid" in
+      *.2.*)
+        channel=stable;;
+      *.1.*)
+        channel=beta;;
+      *.0.*)
+        channel=alpha;;
+    esac
+
+    case "$(uname -m)" in
+      x86_64)
+        board=amd64-usr;;
+      aarch64)
+        board=arm64-usr;;
+    esac
+    echo "Installing the Flatcar kernel sources into the development environment..."
+
+    mkdir -p /host-lib
+    mkdir -p /lib/modules
+
+    curl --retry 3 -fLJO "https://${channel}.release.flatcar-linux.net/${board}/${versionid}/flatcar-container.tar.gz"
+    tar xf flatcar-container.tar.gz -C /lib/modules ./usr/lib/modules --strip-components 4
+    tar xf flatcar-container.tar.gz -C /host-lib ./usr/lib64 --exclude=./usr/lib64/misc/*
+    KERNEL_VERSION="$(ls /lib/modules/)"
+
+    export FLATCAR_RELEASE_CHANNEL="${channel}"
+    export FLATCAR_RELEASE_BOARD="${board}"
+    export FLATCAR_RELEASE_VERSION_ID="${versionid}"
+}
+
+_extract_flatcar_proc_version() {
+    local versionid=${1:?Missing Flatcar version}
+    local channel=${2:?Missing Flatcar channel}
+    local board=${3:?Missing Flatcar board}
+    local image_path=/tmp/flatcar_production_image.vmlinuz
+    local banners_path=/tmp/flatcar_linux_banners
+    local proc_version_path=/lib/modules/${KERNEL_VERSION}/proc/version
+
+    curl --retry 3 -fsSL -o "${image_path}" \
+        "https://${channel}.release.flatcar-linux.net/${board}/${versionid}/flatcar_production_image.vmlinuz"
+
+    # Buffer all banner candidates into a file first: grep -m1 on the live
+    # pipeline would close the pipe early and kill extract-vmlinux/strings
+    # with SIGPIPE (pipefail is enabled by _relocate_flatcar).
+    extract-vmlinux "${image_path}" | strings | grep -E '^Linux version ' > "${banners_path}" || true
+
+    # The image embeds multiple "Linux version" strings. Only the real banner
+    # (identical to /proc/version on the booted host) carries a build number
+    # and timestamp, e.g. "... #1 SMP PREEMPT_DYNAMIC Mon Jun 15 08:27:43 -00 2026".
+    # A truncated template variant ("... # SMP PREEMPT_DYNAMIC ") appears first
+    # in the image and must be skipped, otherwise the packed proc version never
+    # matches at runtime and the driver is rebuilt from source.
+    if ! grep -m1 -E "^Linux version ${KERNEL_VERSION} .*#[0-9]+ SMP " "${banners_path}" > "${proc_version_path}"; then
+        grep -m1 -E '^Linux version .*#[0-9]+ SMP ' "${banners_path}" > "${proc_version_path}" || true
+    fi
+
+    if [ ! -s "${proc_version_path}" ]; then
+        echo "Could not derive Flatcar kernel version string from flatcar_production_image.vmlinuz" >&2
+        return 1
+    fi
+
+    echo "Using Flatcar proc/version: $(cat "${proc_version_path}")"
+}
+
+_fetch_flatcar_modules_host() {
+    mkdir -p /host-lib
+    mkdir -p /lib/modules
+    nsenter -t 1 -m tar cpf - /lib/modules/${KERNEL_VERSION} | tar xpf - -C /
+    nsenter -t 1 -m tar cpf - /usr/lib64/ | tar xpf - -C /host-lib/
+}
+
+_install_prerequisites() {
+    if [ -n "${FLATCAR_VERSION}" ]; then
+      _fetch_flatcar_modules "${FLATCAR_VERSION}"
+    elif _is_flatcar; then
+      _fetch_flatcar_modules_host
+    else
+      _fetch_flatcar_modules
+    fi
+
+    rm -rf /usr/src/linux*
+    #rm -rf /host-lib
+    
+    # Gather the tag for the release matching the current kernel version.
+    #local kernel
+    #kernel=$(echo "${KERNEL_VERSION}" | cut -d "-" -f1)
+    #export COREOS_RELEASE_VERSION=$(curl -Ls "${COREOS_ALL_RELEASES}" | jq -r --arg kernel_ver "${kernel}" 'to_entries[] | select ((.value.major_software.kernel[0] == $kernel_ver) and (.key != "current")) | .key')
+
+    _relocate_flatcar
+
+    mkdir -p /lib/modules/${KERNEL_VERSION}/proc
+    if [ -n "${FLATCAR_VERSION}" ]; then
+        _extract_flatcar_proc_version "${FLATCAR_RELEASE_VERSION_ID}" "${FLATCAR_RELEASE_CHANNEL}" "${FLATCAR_RELEASE_BOARD}"
+    else
+        cp /proc/version /lib/modules/${KERNEL_VERSION}/proc
+    fi
+}
+
+# Check if the kernel version requires a new precompiled driver packages.
+_kernel_requires_package() {
+    local proc_mount_arg=""
+
+    echo "Checking NVIDIA driver packages..."
+    cd "/usr/src/nvidia-${DRIVER_VERSION}/${KERNEL_TYPE}"
+
+    # Prefer the proc/version baked into the precompiled image (written at pack time)
+    # over the running host's /proc/version.  When both are the same build the files
+    # are identical; when KERNEL_VERSION == uname -r (normal Flatcar runtime) the old
+    # code left proc_mount_arg empty and mkprecompiled fell back to the host's
+    # /proc/version, which may differ from the vmlinuz-extracted string we packed with.
+    if [ -d "/lib/modules/${KERNEL_VERSION}/proc" ] || [ "${KERNEL_VERSION}" != "$(uname -r)" ]; then
+        proc_mount_arg="--proc-mount-point /lib/modules/${KERNEL_VERSION}/proc"
+    fi
+    if [ -n "${proc_mount_arg}" ]; then
+        echo "Using proc/version for match: $(cat /lib/modules/${KERNEL_VERSION}/proc/version 2>/dev/null || echo '<missing>')"
+    else
+        echo "Using host /proc/version for match: $(cat /proc/version)"
+    fi
+    # Note that mkprecompiled does not handle empty double-quotes;
+    # so don't wrap variables in double-quotes
+    # The precompiled directory structure is laid out as one directory per KERNEL_VERSION 
+    # and it includes the packed kernel interfaces and other files. So we use the following search pattern:
+    for pkg_name in $(ls -d -1 precompiled/** 2> /dev/null); do
+        if  ! ../mkprecompiled --match ${pkg_name} ${proc_mount_arg} ; then
+            echo "Found NVIDIA driver package ${pkg_name##*/}"
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Compile the kernel modules, optionally sign them, and generate a precompiled package for use later.
+_create_driver_package() {
+    if [ "${CREATE_PRECOMPILED_PACKAGE}" != "true" ]; then
+        return 0
+    fi
+
+    local pkg_name="nvidia-modules-${KERNEL_VERSION%%-*}${PACKAGE_TAG:+-${PACKAGE_TAG}}"
+    local nvidia_sign_args=""
+    local nvidia_modeset_sign_args=""
+    local nvidia_uvm_sign_args=""
+    local nvidia_peermem_sign_args=""
+
+    trap "make -s -j SYSSRC=/lib/modules/${KERNEL_VERSION}/build clean > /dev/null" EXIT
+    echo "Compiling NVIDIA driver kernel modules..."
+    cd "/usr/src/nvidia-${DRIVER_VERSION}/${KERNEL_TYPE}"
+
+    if [ -n "${PRIVATE_KEY}" ]; then
+        echo "Signing NVIDIA driver kernel modules..."
+        donkey get "${PRIVATE_KEY}" sh -c "PATH=${PATH}:/usr/src/linux-headers-${KERNEL_VERSION}/scripts && \
+          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia.ko nvidia.ko.sign &&                          \
+          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-modeset.ko nvidia-modeset.ko.sign &&          \
+          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-uvm.ko &&
+          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-peermem.ko"
+        nvidia_sign_args="--linked-module nvidia.ko --signed-module nvidia.ko.sign"
+        nvidia_modeset_sign_args="--linked-module nvidia-modeset.ko --signed-module nvidia-modeset.ko.sign"
+        nvidia_uvm_sign_args="--signed"
+        nvidia_peermem_sign_args="--signed"
+    fi
+
+    export IGNORE_CC_MISMATCH=1
+    make -s -j$(nproc) SYSSRC=/lib/modules/${KERNEL_VERSION}/build nv-linux.o nv-modeset-linux.o > /dev/null
+
+    # Since kernel 6.12 the vermagic (and other module boilerplate) lives in a
+    # separate module-common object that kbuild only links into the final .ko
+    # during the modfinal stage. Merge it into the kernel interfaces before
+    # packing, otherwise modules relinked from the precompiled interfaces lack
+    # vermagic and the kernel rejects them with "Invalid module format".
+    if [ -f .module-common.o ]; then
+        echo "Merging .module-common.o into the kernel interfaces..."
+        ld -r -o nv-linux-common.o nv-linux.o .module-common.o && mv nv-linux-common.o nv-linux.o
+        ld -r -o nv-modeset-linux-common.o nv-modeset-linux.o .module-common.o && mv nv-modeset-linux-common.o nv-modeset-linux.o
+    fi
+
+    find -name '*.ko'
+    echo "Relinking NVIDIA driver kernel modules..."
+    rm -f nvidia.ko nvidia-modeset.ko
+    ld -d -r -o nvidia.ko ./nv-linux.o ./nvidia/nv-kernel.o_binary
+    ld -d -r -o nvidia-modeset.ko ./nv-modeset-linux.o ./nvidia-modeset/nv-modeset-kernel.o_binary
+
+    # Note that mkprecompiled does not handle empty double-quotes;
+    # so don't wrap variables in double-quotes
+    echo "Building NVIDIA driver package ${pkg_name}..."
+    ../mkprecompiled --pack ${pkg_name} --description ${KERNEL_VERSION}                              \
+                                        --proc-mount-point /lib/modules/${KERNEL_VERSION}/proc       \
+                                        --driver-version ${DRIVER_VERSION}                           \
+                                        --kernel-interface nv-linux.o                                \
+                                        --linked-module-name nvidia.ko                               \
+                                        --core-object-name nvidia/nv-kernel.o_binary                 \
+                                        ${nvidia_sign_args}                                          \
+                                        --target-directory .                                         \
+                                        --kernel-interface nv-modeset-linux.o                        \
+                                        --linked-module-name nvidia-modeset.ko                       \
+                                        --core-object-name nvidia-modeset/nv-modeset-kernel.o_binary \
+                                        ${nvidia_modeset_sign_args}                                  \
+                                        --target-directory .                                         \
+                                        --kernel-module nvidia-uvm.ko                                \
+                                        ${nvidia_uvm_sign_args}                                      \
+                                        --target-directory .                                         \
+                                        --kernel-module nvidia-peermem.ko                            \
+                                        ${nvidia_peermem_sign_args}                                  \
+                                        --target-directory .
+    mkdir -p precompiled
+    mv ${pkg_name} precompiled
+}
+
+# Load the kernel modules and start persistenced.
+_load_driver() {
+    echo "Loading NVIDIA driver kernel modules..."
+    modprobe -a nvidia nvidia-uvm nvidia-modeset
+
+    echo "Starting NVIDIA persistence daemon..."
+    nvidia-persistenced --persistence-mode
+
+    if _assert_nvswitch_system; then
+        echo "Starting NVIDIA fabric manager daemon..."
+        nv-fabricmanager -c /usr/share/nvidia/nvswitch/fabricmanager.cfg
+    fi
+}
+
+# Stop persistenced and unload the kernel modules if they are currently loaded.
+_unload_driver() {
+    local rmmod_args=()
+    local nvidia_deps=0
+    local nvidia_refs=0
+    local nvidia_uvm_refs=0
+    local nvidia_modeset_refs=0
+
+    echo "Stopping NVIDIA persistence daemon..."
+    if [ -f /var/run/nvidia-persistenced/nvidia-persistenced.pid ]; then
+        local pid
+        pid=$(< /var/run/nvidia-persistenced/nvidia-persistenced.pid)
+
+        kill -SIGTERM "${pid}"
+        for i in $(seq 1 10); do
+            kill -0 "${pid}" 2> /dev/null || break
+            sleep 0.1
+        done
+        if [ "$i" -eq 10 ]; then
+            echo "Could not stop NVIDIA persistence daemon" >&2
+            return 1
+        fi
+    fi
+
+    if [ -f /var/run/nvidia-fabricmanager/nv-fabricmanager.pid ]; then
+        echo "Stopping NVIDIA fabric manager daemon..."
+        local pid
+        pid=$(< /var/run/nvidia-fabricmanager/nv-fabricmanager.pid)
+
+        kill -SIGTERM "${pid}"
+        for i in $(seq 1 50); do
+            kill -0 "${pid}" 2> /dev/null || break
+            sleep 0.1
+        done
+        if [ "$i" -eq 50 ]; then
+            echo "Could not stop NVIDIA fabric manager daemon" >&2
+            return 1
+        fi
+    fi
+
+    echo "Unloading NVIDIA driver kernel modules..."
+    if [ -f /sys/module/nvidia_modeset/refcnt ]; then
+        nvidia_modeset_refs=$(< /sys/module/nvidia_modeset/refcnt)
+        rmmod_args+=("nvidia-modeset")
+        ((++nvidia_deps))
+    fi
+    if [ -f /sys/module/nvidia_uvm/refcnt ]; then
+        nvidia_uvm_refs=$(< /sys/module/nvidia_uvm/refcnt)
+        rmmod_args+=("nvidia-uvm")
+        ((++nvidia_deps))
+    fi
+    if [ -f /sys/module/nvidia/refcnt ]; then
+        nvidia_refs=$(< /sys/module/nvidia/refcnt)
+        rmmod_args+=("nvidia")
+    fi
+    if [ "${nvidia_refs}" -gt "${nvidia_deps}" ] || [ "${nvidia_uvm_refs}" -gt 0 ] ||                \
+            [ "${nvidia_modeset_refs}" -gt 0 ]; then
+        echo "Could not unload NVIDIA driver kernel modules, driver is in use" >&2
+        return 1
+    fi
+
+    if [ ${#rmmod_args[@]} -gt 0 ]; then
+        rmmod "${rmmod_args[@]}"
+    fi
+    return 0
+}
+
+_install_driver() {
+    local install_args=()
+
+    echo "Installing NVIDIA driver kernel modules..."
+    cd /usr/src/nvidia-${DRIVER_VERSION}
+    rm -rf /lib/modules/${KERNEL_VERSION}/video
+
+    if [ "${ACCEPT_LICENSE}" = "yes" ]; then
+        install_args+=("--accept-license")
+    fi
+    if [ "${KERNEL_VERSION}" != "$(uname -r)" ]; then
+        # Passing this arg prevents use of a precompiled package.
+        install_args+=(--kernel-name "${KERNEL_VERSION}")
+    fi
+    IGNORE_CC_MISMATCH=1 nvidia-installer --kernel-module-only --no-drm --ui=none --no-nouveau-check -m=${KERNEL_TYPE} ${install_args[@]+"${install_args[@]}"}
+}
+
+# Execute binaries by root owning them first
+_exec() {
+        exec_bin_path=$(command -v "$1")
+        exec_user=$(stat -c "%u" "${exec_bin_path}")
+        exec_group=$(stat -c "%g" "${exec_bin_path}")
+        if [[ "${exec_user}" != "0" || "${exec_group}" != "0" ]]; then
+                chown 0:0 "${exec_bin_path}"
+                "$@"
+                chown "${exec_user}":"${exec_group}" "${exec_bin_path}"
+        else
+                "$@"
+        fi
+}
+
+# Mount the driver rootfs into the run directory with the exception of sysfs.
+_mount_rootfs() {
+    echo "Mounting NVIDIA driver rootfs..."
+    _exec mount --make-runbindable /sys
+    _exec mount --make-private /sys
+    mkdir -p ${RUN_DIR}/driver
+    _exec mount --rbind / ${RUN_DIR}/driver
+
+    echo "Check SELinux status"
+    if [ -e /sys/fs/selinux ]; then
+        echo "SELinux is enabled"
+        echo "Change device files security context for selinux compatibility"
+        chcon -R -t container_file_t ${RUN_DIR}/driver/dev
+    else
+        echo "SELinux is disabled, skipping..."
+    fi
+}
+
+# Unmount the driver rootfs from the run directory.
+_unmount_rootfs() {
+    echo "Unmounting NVIDIA driver rootfs..."
+    if findmnt -r -o TARGET | grep "${RUN_DIR}/driver" > /dev/null; then
+        _exec umount -l -R ${RUN_DIR}/driver
+    fi
+}
+
+_shutdown() {
+    if _unload_driver; then
+        _unmount_rootfs
+        rm -f "${PID_FILE}"
+        return 0
+    fi
+    return 1
+}
+
+init() {
+    printf "\\n========== NVIDIA Software Installer ==========\\n"
+    printf "Starting installation of NVIDIA driver version %s for Linux kernel version %s\\n" "${DRIVER_VERSION}" "${KERNEL_VERSION}"
+
+    exec 3> "${PID_FILE}"
+    if ! flock -n 3; then
+        echo "An instance of the NVIDIA driver is already running, aborting"
+        exit 1
+    fi
+    echo $$ >&3
+
+    trap "echo 'Caught signal'; exit 1" HUP INT QUIT PIPE TERM
+    trap "_shutdown" EXIT
+
+    _unload_driver || exit 1
+    _unmount_rootfs
+
+    if _kernel_requires_package; then
+        _install_prerequisites
+        _create_driver_package
+    fi
+
+    _install_driver
+    _load_driver
+    _mount_rootfs
+
+    echo "Done, now waiting for signal"
+    sleep infinity &
+    trap "echo 'Caught signal'; _shutdown && { kill $!; exit 0; }" HUP INT QUIT PIPE TERM
+    trap - EXIT
+    while true; do wait $! || continue; done
+    exit 0
+}
+
+update() {
+    exec 3>&2
+    if exec 2> /dev/null 4< "${PID_FILE}"; then
+        if ! flock -n 4 && read -r pid <&4 && kill -0 "${pid}"; then
+            exec > >(tee -a "/proc/${pid}/fd/1")
+            exec 2> >(tee -a "/proc/${pid}/fd/2" >&3)
+        else
+            exec 2>&3
+        fi
+        exec 4>&-
+    fi
+    exec 3>&-
+
+    printf "\\n========== NVIDIA Software Updater ==========\\n"
+    printf "Starting update of NVIDIA driver version %s for Linux kernel version %s\\n" "${DRIVER_VERSION}" "${KERNEL_VERSION}"
+
+    trap "echo 'Caught signal'; exit 1" HUP INT QUIT PIPE TERM
+
+    _install_prerequisites
+
+    if _kernel_requires_package; then
+        _create_driver_package
+    fi
+
+    echo "Done"
+    exit 0
+}
+
+usage() {
+    cat >&2 <<EOF
+Usage: $0 COMMAND [ARG...]
+
+Commands:
+  init   [-a | --accept-license]
+  update [-k | --kernel VERSION] [-s | --sign KEYID] [-t | --tag TAG]
+EOF
+    exit 1
+}
+
+if [ $# -eq 0 ]; then
+    usage
+fi
+command=$1; shift
+case "${command}" in
+    init) options=$(getopt -l accept-license -o a -- "$@") ;;
+    update) options=$(getopt -l kernel:,sign:,tag: -o f:k:s:t: -- "$@") ;;
+    *) usage ;;
+esac
+if [ $? -ne 0 ]; then
+    usage
+fi
+eval set -- "${options}"
+
+ACCEPT_LICENSE=""
+KERNEL_VERSION=$(uname -r)
+FLATCAR_VERSION=
+PRIVATE_KEY=""
+PACKAGE_TAG=""
+
+for opt in ${options}; do
+    case "$opt" in
+    -a | --accept-license) ACCEPT_LICENSE="yes"; shift 1 ;;
+    -k | --kernel) KERNEL_VERSION=$2; shift 2 ;;
+    -f | --flatcar) FLATCAR_VERSION=$2; shift 2 ;;
+    -s | --sign) PRIVATE_KEY=$2; shift 2 ;;
+    -t | --tag) PACKAGE_TAG=$2; shift 2 ;;
+    --) shift; break ;;
+    esac
+done
+if [ $# -ne 0 ]; then
+    usage
+fi
+
+$command
