@@ -498,6 +498,7 @@ update() {
 
     trap "echo 'Caught signal'; exit 1" HUP INT QUIT PIPE TERM
 
+    CREATE_PRECOMPILED_PACKAGE=true
     _install_prerequisites
 
     if _kernel_requires_package; then
