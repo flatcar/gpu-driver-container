@@ -515,7 +515,7 @@ Usage: $0 COMMAND [ARG...]
 
 Commands:
   init   [-a | --accept-license]
-  update [-k | --kernel VERSION] [-s | --sign KEYID] [-t | --tag TAG]
+  update [-f | --flatcar VERSION_ID] [-k | --kernel VERSION] [-s | --sign KEYID] [-t | --tag TAG]
 EOF
     exit 1
 }
@@ -526,7 +526,7 @@ fi
 command=$1; shift
 case "${command}" in
     init) options=$(getopt -l accept-license -o a -- "$@") ;;
-    update) options=$(getopt -l kernel:,sign:,tag: -o f:k:s:t: -- "$@") ;;
+    update) options=$(getopt -l flatcar:,kernel:,sign:,tag: -o f:k:s:t: -- "$@") ;;
     *) usage ;;
 esac
 if [ $? -ne 0 ]; then
