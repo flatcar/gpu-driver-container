@@ -48,7 +48,8 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then dpkg --add-architecture i386 ; fi && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /usr/local/bin/donkey https://github.com/3XX0/donkey/releases/download/v1.1.0/donkey && \
-    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /usr/local/bin/extract-vmlinux https://raw.githubusercontent.com/torvalds/linux/master/scripts/extract-vmlinux && \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /usr/local/bin/extract-vmlinux "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/scripts/extract-vmlinux?h=v6.12" && \
+    echo "97cfeeeb51de17f4b5928c5442b56e5581314ddef3cedf2523be2049d79394af  /usr/local/bin/extract-vmlinux" | sha256sum -c - && \
     chmod +x /usr/local/bin/donkey /usr/local/bin/extract-vmlinux
 
 ARG BASE_URL=https://us.download.nvidia.com/tesla
