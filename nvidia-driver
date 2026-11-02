@@ -201,12 +201,9 @@ _kernel_requires_package() {
     echo "Checking NVIDIA driver packages..."
     cd "/usr/src/nvidia-${DRIVER_VERSION}/${KERNEL_TYPE}"
 
-    # Prefer the proc/version baked into the precompiled image (written at pack time)
-    # over the running host's /proc/version.  When both are the same build the files
-    # are identical; when KERNEL_VERSION == uname -r (normal Flatcar runtime) the old
-    # code left proc_mount_arg empty and mkprecompiled fell back to the host's
-    # /proc/version, which may differ from the vmlinuz-extracted string we packed with.
-    if [ -d "/lib/modules/${KERNEL_VERSION}/proc" ] || [ "${KERNEL_VERSION}" != "$(uname -r)" ]; then
+    # Only targeted/offline builds match against the saved banner; at runtime the live
+    # /proc/version must match, as nvidia-installer checks it as well.
+    if [ -n "${FLATCAR_VERSION}" ] || [ "${KERNEL_VERSION}" != "$(uname -r)" ]; then
         proc_mount_arg="--proc-mount-point /lib/modules/${KERNEL_VERSION}/proc"
     fi
     if [ -n "${proc_mount_arg}" ]; then
