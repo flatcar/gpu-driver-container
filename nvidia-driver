@@ -51,6 +51,7 @@ _relocate_flatcar() {
     tools=(
         scripts/basic/fixdep
         scripts/mod/modpost
+        scripts/sign-file
         tools/objtool/objtool
     )
 
