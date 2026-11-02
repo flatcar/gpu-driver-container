@@ -97,6 +97,9 @@ _fetch_flatcar_modules() {
         channel=beta;;
       *.0.*)
         channel=alpha;;
+      *)
+        echo "Unsupported Flatcar VERSION_ID: ${versionid}" >&2
+        return 1;;
     esac
 
     case "$(uname -m)" in
@@ -104,6 +107,9 @@ _fetch_flatcar_modules() {
         board=amd64-usr;;
       aarch64)
         board=arm64-usr;;
+      *)
+        echo "Unsupported architecture: $(uname -m)" >&2
+        return 1;;
     esac
     echo "Installing the Flatcar kernel sources into the development environment..."
 
