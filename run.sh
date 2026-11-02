@@ -2,7 +2,8 @@
 
 set -xeuo pipefail
 
-: ${DRIVER_VERSION:="$(sed -n "s/^ARG DRIVER_VERSION=//p" Dockerfile)"}
+: "${DRIVER_VERSION:="$(sed -n 's/^ARG DRIVER_VERSION=//p' Dockerfile)"}"
+: "${IMAGE_NAME:=ghcr.io/flatcar/driver}"
 . /etc/os-release
 
 docker run -d --privileged --pid=host \
@@ -11,4 +12,4 @@ docker run -d --privileged --pid=host \
      -v /dev/log:/dev/log \
      -v /etc/os-release:/host-etc/os-release \
      --name nvidia-driver \
-     nvidia/nvidia-flatcar-${VERSION_ID}:${DRIVER_VERSION}
+     "${IMAGE_NAME}:${DRIVER_VERSION}-flatcar${VERSION_ID}"

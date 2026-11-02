@@ -111,6 +111,7 @@ jobs:
       - name: Build and push Flatcar driver image
         run: |
           VERSION="$VERSION" \
+          DRIVER_VERSIONS="${{ matrix.driver_version }}" \
           PUSH_ON_BUILD=true \
           make build-${{ matrix.driver_version }}
 
@@ -151,6 +152,7 @@ jobs:
       - name: Build and push precompiled Flatcar driver image
         run: |
           VERSION="$VERSION" \
+          DRIVER_VERSIONS="${{ matrix.driver_version }}" \
           FLATCAR_VERSION="${{ matrix.flatcar_version }}" \
           PUSH_ON_BUILD=true \
           make build-precompiled-${{ matrix.driver_version }}
