@@ -79,6 +79,7 @@ RUN cd /tmp && \
                        --x-sysconfig-path=/tmp/null && \
     mkdir -p /usr/src/nvidia-$DRIVER_VERSION && \
     mv LICENSE mkprecompiled kernel /usr/src/nvidia-$DRIVER_VERSION && \
+    if [ -d kernel-open ]; then mv kernel-open /usr/src/nvidia-$DRIVER_VERSION ; fi && \
     sed '9,${/^\(kernel\|LICENSE\)/!d}' .manifest > /usr/src/nvidia-$DRIVER_VERSION/.manifest && \
     rm -rf /tmp/*
 
