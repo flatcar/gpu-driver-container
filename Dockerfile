@@ -52,7 +52,7 @@ RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /usr/local/bin/do
     chmod +x /usr/local/bin/donkey /usr/local/bin/extract-vmlinux
 
 ARG BASE_URL=https://us.download.nvidia.com/tesla
-ARG DRIVER_VERSION=580.95.05
+ARG DRIVER_VERSION=595.71.05
 ENV DRIVER_VERSION=$DRIVER_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 
