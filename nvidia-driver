@@ -240,19 +240,6 @@ _create_driver_package() {
     echo "Compiling NVIDIA driver kernel modules..."
     cd "/usr/src/nvidia-${DRIVER_VERSION}/${KERNEL_TYPE}"
 
-    if [ -n "${PRIVATE_KEY}" ]; then
-        echo "Signing NVIDIA driver kernel modules..."
-        donkey get "${PRIVATE_KEY}" sh -c "PATH=${PATH}:/usr/src/linux-headers-${KERNEL_VERSION}/scripts && \
-          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia.ko nvidia.ko.sign &&                          \
-          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-modeset.ko nvidia-modeset.ko.sign &&          \
-          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-uvm.ko &&
-          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-peermem.ko"
-        nvidia_sign_args="--linked-module nvidia.ko --signed-module nvidia.ko.sign"
-        nvidia_modeset_sign_args="--linked-module nvidia-modeset.ko --signed-module nvidia-modeset.ko.sign"
-        nvidia_uvm_sign_args="--signed"
-        nvidia_peermem_sign_args="--signed"
-    fi
-
     export IGNORE_CC_MISMATCH=1
     make -s -j$(nproc) SYSSRC=/lib/modules/${KERNEL_VERSION}/build nv-linux.o nv-modeset-linux.o > /dev/null
 
@@ -272,6 +259,19 @@ _create_driver_package() {
     rm -f nvidia.ko nvidia-modeset.ko
     ld -d -r -o nvidia.ko ./nv-linux.o ./nvidia/nv-kernel.o_binary
     ld -d -r -o nvidia-modeset.ko ./nv-modeset-linux.o ./nvidia-modeset/nv-modeset-kernel.o_binary
+
+    if [ -n "${PRIVATE_KEY}" ]; then
+        echo "Signing NVIDIA driver kernel modules..."
+        donkey get "${PRIVATE_KEY}" sh -c "PATH=${PATH}:/lib/modules/${KERNEL_VERSION}/build/scripts && \
+          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia.ko nvidia.ko.sign &&                          \
+          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-modeset.ko nvidia-modeset.ko.sign &&          \
+          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-uvm.ko &&
+          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-peermem.ko"
+        nvidia_sign_args="--linked-module nvidia.ko --signed-module nvidia.ko.sign"
+        nvidia_modeset_sign_args="--linked-module nvidia-modeset.ko --signed-module nvidia-modeset.ko.sign"
+        nvidia_uvm_sign_args="--signed"
+        nvidia_peermem_sign_args="--signed"
+    fi
 
     # Note that mkprecompiled does not handle empty double-quotes;
     # so don't wrap variables in double-quotes
