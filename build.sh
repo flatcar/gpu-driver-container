@@ -2,9 +2,10 @@
 
 set -xeuo pipefail
 
-: ${DRIVER_VERSION:="$(sed -n "s/^ARG DRIVER_VERSION=//p" Dockerfile)"}
+: "${DRIVER_VERSION:="$(sed -n 's/^ARG DRIVER_VERSION=//p' Dockerfile)"}"
+: "${IMAGE_NAME:=ghcr.io/flatcar/driver}"
 
 docker build --pull \
-    --tag nvidia/nvidia-driver-flatcar:${DRIVER_VERSION} \
+    --build-arg DRIVER_VERSION="${DRIVER_VERSION}" \
+    --tag "${IMAGE_NAME}:${DRIVER_VERSION}-flatcar" \
     --file Dockerfile .
-docker tag nvidia/nvidia-driver-flatcar:${DRIVER_VERSION} nvidia/nvidia-driver-flatcar:latest

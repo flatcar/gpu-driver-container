@@ -98,7 +98,7 @@ $ git clone https://github.com/flatcar/gpu-driver-container.git \
 ```
 
 ```bash
-$ DRIVER_VERSION=460.32.03 
+$ DRIVER_VERSION=595.71.05
 $ docker build --pull \
     --build-arg DRIVER_VERSION=$DRIVER_VERSION \
     --tag nvidia/nvidia-driver-flatcar:${DRIVER_VERSION} \
