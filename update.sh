@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -x
+set -xeuo pipefail
 
 : "${DRIVER_VERSION:="$(sed -n 's/^ARG DRIVER_VERSION=//p' Dockerfile)"}"
 : "${IMAGE_NAME:=ghcr.io/flatcar/driver}"
