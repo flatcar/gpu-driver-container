@@ -100,8 +100,8 @@ $ git clone https://github.com/flatcar/gpu-driver-container.git \
 ```bash
 $ DRIVER_VERSION=595.71.05
 $ docker build --pull \
-    --build-arg DRIVER_VERSION=$DRIVER_VERSION \
-    --tag nvidia/nvidia-driver-flatcar:${DRIVER_VERSION} \
+    --build-arg DRIVER_VERSION="${DRIVER_VERSION}" \
+    --tag ghcr.io/flatcar/driver:${DRIVER_VERSION}-flatcar \
     --file Dockerfile .
 ```
 
@@ -111,11 +111,12 @@ Launch the driver container using the following as an example:
 
 ```bash
 $ docker run -d --privileged --pid=host \
+    --entrypoint nvidia-driver \
     -v /run/nvidia:/run/nvidia:shared \
     -v /tmp/nvidia:/var/log \
     -v /usr/lib64/modules:/usr/lib64/modules \
     --name nvidia-driver \
-    nvidia/nvidia-driver-flatcar:${DRIVER_VERSION} update
+    ghcr.io/flatcar/driver:${DRIVER_VERSION}-flatcar update
 ```
 
 The building of the kernel modules takes a few minutes. You can also stream the logs of the container:
@@ -140,9 +141,11 @@ Done
 Now we can commit the image with a changed entrypoint. The image may also be stored in an image registry for use later.
 
 ```bash
+$ . /etc/os-release
 $ docker commit \
     --change='ENTRYPOINT ["nvidia-driver", "init"]' \
-    nvidia-driver nvidia/nvidia-kmods-driver-flatcar:${DRIVER_VERSION}
+    nvidia-driver ghcr.io/flatcar/driver:${DRIVER_VERSION}-flatcar${VERSION_ID}
+$ docker rm nvidia-driver
 ```
 
 ### Running the Driver Container
@@ -154,7 +157,7 @@ $ docker run -d --privileged --pid=host \
      -v /run/nvidia:/run/nvidia:shared \
      -v /tmp/nvidia:/var/log \
      -v /usr/lib64/modules:/usr/lib64/modules \
-     nvidia/nvidia-kmods-driver-flatcar:${DRIVER_VERSION}
+     ghcr.io/flatcar/driver:${DRIVER_VERSION}-flatcar${VERSION_ID}
 ```
 
 The driver container will look for the precompiled interfaces and then use those if available. 
@@ -289,7 +292,7 @@ Notes:
 ### Reinstalling from scratch
 
 If you delete the `gpu-operator` namespace without `helm uninstall`, cluster-scoped
-leftovers block a fresh install. Clean them up first:
+leftovers block a fresh installation. Clean them up first:
 
 ```bash
 kubectl delete clusterpolicy cluster-policy
