@@ -118,6 +118,7 @@ jobs:
       - name: Tag image for GPU Operator Flatcar suffix
         run: |
           BASE_TAG="${VERSION:+${VERSION}-}${{ matrix.driver_version }}-flatcar"
+          # Intentionally "-flatcar-flatcar<VERSION_ID>": the GPU Operator appends "-flatcar<VERSION_ID>" to driver.version.
           for FLATCAR_VERSION in ${{ needs.setup.outputs.flatcar_versions_plain }}; do
             docker buildx imagetools create \
               -t "${IMAGE_NAME}:${BASE_TAG}-flatcar${FLATCAR_VERSION}" \
