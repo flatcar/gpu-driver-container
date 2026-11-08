@@ -78,9 +78,8 @@ RUN cd /tmp && \
                        --x-library-path=/tmp/null \
                        --x-sysconfig-path=/tmp/null && \
     mkdir -p /usr/src/nvidia-$DRIVER_VERSION && \
-    mv LICENSE mkprecompiled kernel /usr/src/nvidia-$DRIVER_VERSION && \
-    if [ -d kernel-open ]; then mv kernel-open /usr/src/nvidia-$DRIVER_VERSION ; fi && \
-    sed '9,${/^\(kernel\|LICENSE\)/!d}' .manifest > /usr/src/nvidia-$DRIVER_VERSION/.manifest && \
+    mv LICENSE kernel-open firmware /usr/src/nvidia-$DRIVER_VERSION && \
+    sed '9,${/^\(kernel-open\|firmware\|LICENSE\)/!d}' .manifest > /usr/src/nvidia-$DRIVER_VERSION/.manifest && \
     rm -rf /tmp/*
 
 # Install fabric manager and NSCQ for NVSwitch based systems (e.g. HGX/DGX A100, H100, H200).
@@ -114,7 +113,7 @@ COPY nvidia-driver /usr/local/bin
 WORKDIR /usr/src/nvidia-$DRIVER_VERSION
 
 ARG PUBLIC_KEY=empty
-COPY ${PUBLIC_KEY} kernel/pubkey.x509
+COPY ${PUBLIC_KEY} kernel-open/pubkey.x509
 
 # Add NGC DL license from the CUDA image
 RUN mkdir /licenses && mv /NGC-DL-CONTAINER-LICENSE /licenses/NGC-DL-CONTAINER-LICENSE
