@@ -12,8 +12,15 @@ GPU_DIRECT_RDMA_ENABLED=${GPU_DIRECT_RDMA_ENABLED:-false}
 CREATE_PRECOMPILED_PACKAGE=${CREATE_PRECOMPILED_PACKAGE:-false}
 
 
-OPEN_KERNEL_MODULES_ENABLED=${OPEN_KERNEL_MODULES_ENABLED:-false}
-[[ "${OPEN_KERNEL_MODULES_ENABLED}" == "true" ]] && KERNEL_TYPE=kernel-open || KERNEL_TYPE=kernel
+KERNEL_MODULE_TYPE=${KERNEL_MODULE_TYPE:-auto}
+if [ "${KERNEL_MODULE_TYPE}" = "proprietary" ]; then
+    echo "Proprietary kernel modules are not supported, only open kernel modules (Turing or newer GPUs)" >&2
+    exit 1
+fi
+KERNEL_TYPE=kernel-open
+# Outside the module source tree, since kbuild's clean removes all *.ko files below it.
+PRECOMPILED_DIR=/usr/src/nvidia-${DRIVER_VERSION}/precompiled
+MODULES=(nvidia nvidia-modeset nvidia-uvm nvidia-peermem)
 
 #export COREOS_RELEASE_CHANNEL=stable
 #COREOS_RELEASE_BOARD=amd64-usr
@@ -194,113 +201,83 @@ _install_prerequisites() {
     fi
 }
 
-# Check if the kernel version requires a new precompiled driver packages.
-_kernel_requires_package() {
-    local proc_mount_arg=""
+# Check if precompiled modules exist for the exact kernel build (banner incl. build timestamp).
+_precompiled_matches() {
+    local proc_version=/proc/version
+    local pkg_dir=${PRECOMPILED_DIR}/${KERNEL_VERSION}
 
-    echo "Checking NVIDIA driver packages..."
-    cd "/usr/src/nvidia-${DRIVER_VERSION}/${KERNEL_TYPE}"
-
-    # Only targeted/offline builds match against the saved banner; at runtime the live
-    # /proc/version must match, as nvidia-installer checks it as well.
+    # Only targeted/offline builds match against the saved banner.
     if [ -n "${FLATCAR_VERSION}" ] || [ "${KERNEL_VERSION}" != "$(uname -r)" ]; then
-        proc_mount_arg="--proc-mount-point /lib/modules/${KERNEL_VERSION}/proc"
+        proc_version=/lib/modules/${KERNEL_VERSION}/proc/version
     fi
-    if [ -n "${proc_mount_arg}" ]; then
-        echo "Using proc/version for match: $(cat /lib/modules/${KERNEL_VERSION}/proc/version 2>/dev/null || echo '<missing>')"
-    else
-        echo "Using host /proc/version for match: $(cat /proc/version)"
+    # No cmp -s: it compares sizes first and /proc files report size 0.
+    [ -f "${pkg_dir}/proc-version" ] && cmp "${pkg_dir}/proc-version" "${proc_version}" > /dev/null 2>&1
+}
+
+# Check if the kernel version requires new precompiled driver modules.
+_kernel_requires_package() {
+    echo "Checking NVIDIA driver packages..."
+    if _precompiled_matches; then
+        echo "Found precompiled NVIDIA kernel modules for ${KERNEL_VERSION}"
+        return 1
     fi
-    # Note that mkprecompiled does not handle empty double-quotes;
-    # so don't wrap variables in double-quotes
-    # The precompiled directory structure is laid out as one directory per KERNEL_VERSION 
-    # and it includes the packed kernel interfaces and other files. So we use the following search pattern:
-    for pkg_name in $(ls -d -1 precompiled/** 2> /dev/null); do
-        if  ! ../mkprecompiled --match ${pkg_name} ${proc_mount_arg} ; then
-            echo "Found NVIDIA driver package ${pkg_name##*/}"
-            return 1
-        fi
-    done
     return 0
 }
 
-# Compile the kernel modules, optionally sign them, and generate a precompiled package for use later.
+# Compile the kernel modules, optionally sign them, and store them for use later.
 _create_driver_package() {
     if [ "${CREATE_PRECOMPILED_PACKAGE}" != "true" ]; then
         return 0
     fi
 
-    local pkg_name="nvidia-modules-${KERNEL_VERSION%%-*}${PACKAGE_TAG:+-${PACKAGE_TAG}}"
-    local nvidia_sign_args=""
-    local nvidia_modeset_sign_args=""
-    local nvidia_uvm_sign_args=""
-    local nvidia_peermem_sign_args=""
+    local pkg_dir=${PRECOMPILED_DIR}/${KERNEL_VERSION}
 
     trap "make -s -j SYSSRC=/lib/modules/${KERNEL_VERSION}/build clean > /dev/null" EXIT
     echo "Compiling NVIDIA driver kernel modules..."
     cd "/usr/src/nvidia-${DRIVER_VERSION}/${KERNEL_TYPE}"
 
+    # Build complete modules with kbuild, so objtool and modfinal run as for in-tree modules.
     export IGNORE_CC_MISMATCH=1
-    make -s -j$(nproc) SYSSRC=/lib/modules/${KERNEL_VERSION}/build nv-linux.o nv-modeset-linux.o > /dev/null
-
-    # Since kernel 6.12 the vermagic (and other module boilerplate) lives in a
-    # separate module-common object that kbuild only links into the final .ko
-    # during the modfinal stage. Merge it into the kernel interfaces before
-    # packing, otherwise modules relinked from the precompiled interfaces lack
-    # vermagic and the kernel rejects them with "Invalid module format".
-    if [ -f .module-common.o ]; then
-        echo "Merging .module-common.o into the kernel interfaces..."
-        ld -r -o nv-linux-common.o nv-linux.o .module-common.o && mv nv-linux-common.o nv-linux.o
-        ld -r -o nv-modeset-linux-common.o nv-modeset-linux.o .module-common.o && mv nv-modeset-linux-common.o nv-modeset-linux.o
-    fi
-
-    find -name '*.ko'
-    echo "Relinking NVIDIA driver kernel modules..."
-    rm -f nvidia.ko nvidia-modeset.ko
-    ld -d -r -o nvidia.ko ./nv-linux.o ./nvidia/nv-kernel.o_binary
-    ld -d -r -o nvidia-modeset.ko ./nv-modeset-linux.o ./nvidia-modeset/nv-modeset-kernel.o_binary
+    make -s -j$(nproc) SYSSRC=/lib/modules/${KERNEL_VERSION}/build modules > /dev/null
 
     if [ -n "${PRIVATE_KEY}" ]; then
         echo "Signing NVIDIA driver kernel modules..."
         donkey get "${PRIVATE_KEY}" sh -c "PATH=${PATH}:/lib/modules/${KERNEL_VERSION}/build/scripts && \
-          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia.ko nvidia.ko.sign &&                          \
-          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-modeset.ko nvidia-modeset.ko.sign &&          \
-          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-uvm.ko &&
-          sign-file sha512 \$DONKEY_FILE pubkey.x509 nvidia-peermem.ko"
-        nvidia_sign_args="--linked-module nvidia.ko --signed-module nvidia.ko.sign"
-        nvidia_modeset_sign_args="--linked-module nvidia-modeset.ko --signed-module nvidia-modeset.ko.sign"
-        nvidia_uvm_sign_args="--signed"
-        nvidia_peermem_sign_args="--signed"
+          for m in ${MODULES[*]}; do sign-file sha512 \$DONKEY_FILE pubkey.x509 \$m.ko || exit 1; done"
     fi
 
-    # Note that mkprecompiled does not handle empty double-quotes;
-    # so don't wrap variables in double-quotes
-    echo "Building NVIDIA driver package ${pkg_name}..."
-    ../mkprecompiled --pack ${pkg_name} --description ${KERNEL_VERSION}                              \
-                                        --proc-mount-point /lib/modules/${KERNEL_VERSION}/proc       \
-                                        --driver-version ${DRIVER_VERSION}                           \
-                                        --kernel-interface nv-linux.o                                \
-                                        --linked-module-name nvidia.ko                               \
-                                        --core-object-name nvidia/nv-kernel.o_binary                 \
-                                        ${nvidia_sign_args}                                          \
-                                        --target-directory .                                         \
-                                        --kernel-interface nv-modeset-linux.o                        \
-                                        --linked-module-name nvidia-modeset.ko                       \
-                                        --core-object-name nvidia-modeset/nv-modeset-kernel.o_binary \
-                                        ${nvidia_modeset_sign_args}                                  \
-                                        --target-directory .                                         \
-                                        --kernel-module nvidia-uvm.ko                                \
-                                        ${nvidia_uvm_sign_args}                                      \
-                                        --target-directory .                                         \
-                                        --kernel-module nvidia-peermem.ko                            \
-                                        ${nvidia_peermem_sign_args}                                  \
-                                        --target-directory .
-    mkdir -p precompiled
-    mv ${pkg_name} precompiled
+    echo "Storing precompiled NVIDIA kernel modules in ${pkg_dir}..."
+    rm -rf "${pkg_dir}"
+    mkdir -p "${pkg_dir}"
+    for m in "${MODULES[@]}"; do
+        cp "${m}.ko" "${pkg_dir}/"
+    done
+    cp "/lib/modules/${KERNEL_VERSION}/proc/version" "${pkg_dir}/proc-version"
+}
+
+# The GPU Operator mounts a host directory over /lib/firmware, hiding the firmware shipped in the image.
+_install_firmware() {
+    local fw_dir=/lib/firmware/nvidia/${DRIVER_VERSION}
+
+    echo "Installing NVIDIA GSP firmware into ${fw_dir}..."
+    mkdir -p "${fw_dir}"
+    cp -f /usr/src/nvidia-${DRIVER_VERSION}/firmware/*.bin "${fw_dir}/"
 }
 
 # Load the kernel modules and start persistenced.
 _load_driver() {
+    local fw_path_file=/sys/module/firmware_class/parameters/path
+    local fw_path="${RUN_DIR}/driver/lib/firmware"
+
+    # Open modules need the GSP firmware; the kernel looks it up in the host mount
+    # namespace, where the driver rootfs is mounted at ${RUN_DIR}/driver.
+    if [ -z "$(tr -d '[:space:]' < "${fw_path_file}")" ]; then
+        echo "Setting firmware search path to ${fw_path}"
+        echo -n "${fw_path}" > "${fw_path_file}"
+    elif [ "$(< "${fw_path_file}")" != "${fw_path}" ]; then
+        echo "WARNING: firmware search path already set to '$(< "${fw_path_file}")', keeping it"
+    fi
+
     echo "Loading NVIDIA driver kernel modules..."
     modprobe -a nvidia nvidia-uvm nvidia-modeset
 
@@ -383,9 +360,19 @@ _unload_driver() {
 _install_driver() {
     local install_args=()
 
+    rm -rf /lib/modules/${KERNEL_VERSION}/video
+
+    # nvidia-installer only accepts precompiled interfaces, not complete modules.
+    if _precompiled_matches; then
+        echo "Installing precompiled NVIDIA driver kernel modules..."
+        mkdir -p "/lib/modules/${KERNEL_VERSION}/kernel/drivers/video"
+        cp "${PRECOMPILED_DIR}/${KERNEL_VERSION}"/*.ko "/lib/modules/${KERNEL_VERSION}/kernel/drivers/video/"
+        depmod "${KERNEL_VERSION}"
+        return 0
+    fi
+
     echo "Installing NVIDIA driver kernel modules..."
     cd /usr/src/nvidia-${DRIVER_VERSION}
-    rm -rf /lib/modules/${KERNEL_VERSION}/video
 
     if [ "${ACCEPT_LICENSE}" = "yes" ]; then
         install_args+=("--accept-license")
@@ -469,8 +456,9 @@ init() {
     fi
 
     _install_driver
-    _load_driver
+    _install_firmware
     _mount_rootfs
+    _load_driver
 
     echo "Done, now waiting for signal"
     sleep infinity &
@@ -515,7 +503,7 @@ Usage: $0 COMMAND [ARG...]
 
 Commands:
   init   [-a | --accept-license]
-  update [-f | --flatcar VERSION_ID] [-k | --kernel VERSION] [-s | --sign KEYID] [-t | --tag TAG]
+  update [-f | --flatcar VERSION_ID] [-k | --kernel VERSION] [-s | --sign KEYID]
 EOF
     exit 1
 }
@@ -526,7 +514,7 @@ fi
 command=$1; shift
 case "${command}" in
     init) options=$(getopt -l accept-license -o a -- "$@") ;;
-    update) options=$(getopt -l flatcar:,kernel:,sign:,tag: -o f:k:s:t: -- "$@") ;;
+    update) options=$(getopt -l flatcar:,kernel:,sign: -o f:k:s: -- "$@") ;;
     *) usage ;;
 esac
 if [ $? -ne 0 ]; then
@@ -538,7 +526,6 @@ ACCEPT_LICENSE=""
 KERNEL_VERSION=$(uname -r)
 FLATCAR_VERSION=
 PRIVATE_KEY=""
-PACKAGE_TAG=""
 
 while true; do
     case "$1" in
@@ -546,7 +533,6 @@ while true; do
     -k | --kernel) KERNEL_VERSION=$2; shift 2 ;;
     -f | --flatcar) FLATCAR_VERSION=$2; shift 2 ;;
     -s | --sign) PRIVATE_KEY=$2; shift 2 ;;
-    -t | --tag) PACKAGE_TAG=$2; shift 2 ;;
     --) shift; break ;;
     *) usage ;;
     esac

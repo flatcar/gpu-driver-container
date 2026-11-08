@@ -26,7 +26,8 @@ The following NVIDIA datacenter drivers have been tested with this container on 
 Other datacenter driver versions from the [NVIDIA driver downloads](https://www.nvidia.com/en-us/drivers/) are expected to work as
 long as they support the running kernel.
 
-NVIDIA datacenter GPUs based on Pascal+ architecture (e.g. P100, V100, T4, A100, L40S, H100) are supported. On NVSwitch based 
+Only the NVIDIA open GPU kernel modules are used, so NVIDIA datacenter GPUs based on Turing+ architecture (e.g. T4, A100, L40S,
+H100) are supported; older GPUs such as P100 or V100 are not. On NVSwitch based 
 systems (e.g. HGX/DGX A100, H100, H200) the driver container ships the NVIDIA Fabric Manager and NSCQ library and starts the 
 Fabric Manager automatically when NVSwitch devices are detected (`/proc/driver/nvidia-nvswitch/devices`); this has been verified 
 on HGX H100 8-GPU systems. Note that NVLink5+ systems (e.g. GB200 NVL) additionally require the NVLink Subnet Manager, which is 
@@ -74,10 +75,10 @@ The `container-config` would have also created a `daemon.json` for Docker in `/e
 
 ## Workflow
 
-The driver container includes logic to precompile the NVIDIA kernel module interfaces and package them for later use. This has a 
-few advantages - reduced startup time since the module interfaces are already built; ability to build on systems without GPUs and 
+The driver container includes logic to precompile the NVIDIA open kernel modules and store them for later use. This has a 
+few advantages - reduced startup time since the modules are already built; ability to build on systems without GPUs and 
 reduced image footprint as we no longer need to either download or ship the development environment within the image. 
-Note that the precompilation logic works when there is a matching running kernel and falls back to building the modules. 
+Note that the precompiled modules are only used when the running kernel build matches exactly (`/proc/version`); otherwise the modules are built at runtime. 
 
 To facilitate this optimization, the workflow can be:
 1. Build the driver container
@@ -105,7 +106,7 @@ $ docker build --pull \
     --file Dockerfile .
 ```
 
-### Precompile Kernel Interfaces
+### Precompile Kernel Modules
 
 Launch the driver container using the following as an example:
 
@@ -127,12 +128,9 @@ $ docker logs -f nvidia-driver
 Once the modules are built, you should see an output as shown:
 
 ```console
-Compiling NVIDIA driver kernel modules with gcc (Gentoo Hardened 9.3.0-r1 p3) 9.3.0...
-scripts/Makefile.lib:8: 'always' is deprecated. Please use 'always-y' instead
-Cleaning up the development environment...
 Checking NVIDIA driver packages...
-Building NVIDIA driver package nvidia-modules-5.10.25...
-Packaged precompiled driver into /usr/src/nvidia-460.32.03/kernel/precompiled/5.10.25-flatcar
+Compiling NVIDIA driver kernel modules...
+Storing precompiled NVIDIA kernel modules in /usr/src/nvidia-595.71.05/precompiled/6.12.113-flatcar...
 Done
 ```
 
@@ -160,24 +158,23 @@ $ docker run -d --privileged --pid=host \
      ghcr.io/flatcar/driver:${DRIVER_VERSION}-flatcar${VERSION_ID}
 ```
 
-The driver container will look for the precompiled interfaces and then use those if available. 
+The driver container will look for the precompiled modules and then use those if available. 
 The startup time of the container in this case would be reduced:
 
 ```console
 ...
 ========== NVIDIA Software Installer ==========
-Starting installation of NVIDIA driver version 460.32.03 for Linux kernel version 5.10.25-flatcar
+Starting installation of NVIDIA driver version 595.71.05 for Linux kernel version 6.12.113-flatcar
 Stopping NVIDIA persistence daemon...
 Unloading NVIDIA driver kernel modules...
 Unmounting NVIDIA driver rootfs...
 Checking NVIDIA driver packages...
-Found NVIDIA driver package nvidia-modules-5.10.25
-Installing NVIDIA driver kernel modules...
-Re-linking NVIDIA driver kernel modules...
-depmod: WARNING: could not open /opt/nvidia/460.32.03/lib/modules/5.10.25-flatcar/modules.builtin: No such file or directory
+Found precompiled NVIDIA kernel modules for 6.12.113-flatcar
+Installing precompiled NVIDIA driver kernel modules...
+Mounting NVIDIA driver rootfs...
+Setting firmware search path to /run/nvidia/driver/lib/firmware
 Loading NVIDIA driver kernel modules...
 Starting NVIDIA persistence daemon...
-Mounting NVIDIA driver rootfs...
 Done, now waiting for signal
 ```
 
@@ -248,14 +245,14 @@ Notes:
    compilation):
 
    ```bash
-   kubectl -n gpu-operator logs -l app=nvidia-driver-daemonset | grep -E "Found NVIDIA driver package|kernel interface matches"
+   kubectl -n gpu-operator logs -l app=nvidia-driver-daemonset | grep -E "precompiled NVIDIA"
    ```
 
    Expected output:
 
    ```
-   kernel interface matches.
-   Found NVIDIA driver package nvidia-modules-6.12.81
+   Found precompiled NVIDIA kernel modules for 6.12.81-flatcar
+   Installing precompiled NVIDIA driver kernel modules...
    ```
 
    If you instead see `Installing the Flatcar kernel sources...` or
