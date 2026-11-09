@@ -227,7 +227,7 @@ _unload_driver() {
     fi
 
     if [ ${#rmmod_args[@]} -gt 0 ]; then
-        rmmod "${rmmod_args[@]}"
+        rmmod "${rmmod_args[@]}" || return 1
     fi
     return 0
 }
