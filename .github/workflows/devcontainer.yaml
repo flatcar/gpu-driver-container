@@ -1,0 +1,69 @@
+name: devcontainer
+
+on:
+  workflow_dispatch:
+    inputs:
+      flatcar_versions:
+        description: Space-separated Flatcar VERSION_ID values to import
+        required: true
+        default: "4757.2.2"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/flatcar-devcontainer
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      flatcar_versions: ${{ steps.vars.outputs.flatcar_versions }}
+    steps:
+      - name: Compute matrix
+        id: vars
+        env:
+          FLATCAR_VERSIONS: ${{ inputs.flatcar_versions }}
+        run: |
+          echo "flatcar_versions=$(echo "$FLATCAR_VERSIONS" | jq -R -c 'split(" ") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+
+  import:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flatcar_version: ${{ fromJSON(needs.setup.outputs.flatcar_versions) }}
+    steps:
+      - uses: actions/checkout@v6
+        name: Check out code
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for existing image
+        id: exists
+        env:
+          FLATCAR_VERSION: ${{ matrix.flatcar_version }}
+        run: |
+          if docker manifest inspect "${IMAGE_NAME}:${FLATCAR_VERSION}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The decompressed disk image and the imported image need ~10 GB.
+      - name: Free disk space
+        if: steps.exists.outputs.exists != 'true'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Import and push developer container
+        if: steps.exists.outputs.exists != 'true'
+        env:
+          FLATCAR_VERSION: ${{ matrix.flatcar_version }}
+        run: |
+          IMAGE_NAME="${IMAGE_NAME}" ./import-devcontainer.sh "${FLATCAR_VERSION}"
+          docker push "${IMAGE_NAME}:${FLATCAR_VERSION}"
