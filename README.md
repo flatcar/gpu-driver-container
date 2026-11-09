@@ -5,13 +5,12 @@ To provide better security, Flatcar is immutable and contains minimal tools to r
 
 ## Prerequisites
 
-Since the driver container uses a `loop` device to mount the Flatcar development environment, the `loop` kernel module should be loaded. 
-The NVIDIA driver also has a dependency on the following modules: `i2c_core` and `ipmi_msghandler`. For convenience, these modules can be 
+The NVIDIA driver has a dependency on the following modules: `i2c_core` and `ipmi_msghandler`. For convenience, these modules can be 
 configured to be loaded at reboot.
 
 ```bash
-$ sudo modprobe -a loop i2c_core ipmi_msghandler \
-    && echo -e "loop\ni2c_core\nipmi_msghandler" | sudo tee /etc/modules-load.d/driver.conf
+$ sudo modprobe -a i2c_core ipmi_msghandler \
+    && echo -e "i2c_core\nipmi_msghandler" | sudo tee /etc/modules-load.d/driver.conf
 ```
 
 If you're getting started with Flatcar on EC2, then Flatcar images for various regions can be found here:
@@ -73,96 +72,44 @@ $ docker info | grep -i nvidia
 
 The `container-config` would have also created a `daemon.json` for Docker in `/etc/docker/daemon.json` with the `nvidia` runtime binaries being located in the directory specified (`/opt/nvidia-runtime` in our example).
 
-## Workflow
+## Building the Driver Images
 
-The driver container includes logic to precompile the NVIDIA open kernel modules and store them for later use. This has a 
-few advantages - reduced startup time since the modules are already built; ability to build on systems without GPUs and 
-reduced image footprint as we no longer need to either download or ship the development environment within the image. 
-Note that the precompiled modules are only used when the running kernel build matches exactly (`/proc/version`); otherwise the modules are built at runtime. 
+The `Dockerfile` has two targets, both built with the Makefile:
 
-To facilitate this optimization, the workflow can be:
-1. Build the driver container
-1. Commit and tag the image with a changed entrypoint
-1. Run the driver container with the tagged image in the previous step
-
-Note that you can skip these steps on systems where you want to build and run the container directly by providing 
-the `init` argument to the driver container (instead of `update`) in the workflow below. By doing so, the driver 
-container will first build and then load the kernel modules.
-
-### Building the Driver Container
-
-Clone this repository and build a driver container image using the following as an example:
+- **generic** (`<driver-version>-flatcar`): compiles the NVIDIA open kernel modules at runtime against the
+  kernel build tree of the running Flatcar host. Works on any Flatcar release, startup takes a few minutes.
+- **precompiled** (`<driver-version>-flatcar<VERSION_ID>`): the modules are built at image build time inside the
+  [Flatcar developer container](https://www.flatcar.org/docs/latest/devguide/kernel-modules/) of that release, i.e.
+  with the exact compiler and kernel build tree Flatcar uses. The image contains no compiler or kernel sources and
+  only starts on nodes running exactly that kernel build (`/proc/version`); on any other kernel it exits with an
+  error pointing to the generic image.
 
 ```bash
 $ git clone https://github.com/flatcar/gpu-driver-container.git \
     && cd gpu-driver-container
+
+# generic image
+$ make build-595.71.05
+
+# precompiled image for Flatcar 4757.2.2
+$ FLATCAR_VERSION=4757.2.2 make build-precompiled-595.71.05
 ```
+
+The precompiled build uses `ghcr.io/flatcar/flatcar-devcontainer:<VERSION_ID>` by default (`DEVCONTAINER_IMAGE`).
+Flatcar publishes the developer container only as a disk image, so it is converted into a container image with
+`import-devcontainer.sh`, which verifies the release signature against the Flatcar image signing key
+(`flatcar-image-signing-key.asc`). In CI this is done by the `devcontainer` workflow. To build locally against a
+locally imported developer container:
 
 ```bash
-$ DRIVER_VERSION=595.71.05
-$ docker build --pull \
-    --build-arg DRIVER_VERSION="${DRIVER_VERSION}" \
-    --tag ghcr.io/flatcar/driver:${DRIVER_VERSION}-flatcar \
-    --file Dockerfile .
+$ ./import-devcontainer.sh 4757.2.2
+$ FLATCAR_VERSION=4757.2.2 DEVCONTAINER_IMAGE=flatcar-devcontainer:4757.2.2 PULL= \
+    make build-precompiled-595.71.05
 ```
 
-### Precompile Kernel Modules
-
-Launch the driver container using the following as an example:
-
-```bash
-$ docker run -d --privileged --pid=host \
-    --entrypoint nvidia-driver \
-    -v /run/nvidia:/run/nvidia:shared \
-    -v /tmp/nvidia:/var/log \
-    -v /usr/lib64/modules:/usr/lib64/modules \
-    --name nvidia-driver \
-    ghcr.io/flatcar/driver:${DRIVER_VERSION}-flatcar update
-```
-
-The building of the kernel modules takes a few minutes. You can also stream the logs of the container:
-
-```bash
-$ docker logs -f nvidia-driver
-```
-Once the modules are built, you should see an output as shown:
+The driver container logs show which path is used:
 
 ```console
-Checking NVIDIA driver packages...
-Compiling NVIDIA driver kernel modules...
-Storing precompiled NVIDIA kernel modules in /usr/src/nvidia-595.71.05/precompiled/6.12.113-flatcar...
-Done
-```
-
-### Commit Image
-
-Now we can commit the image with a changed entrypoint. The image may also be stored in an image registry for use later.
-
-```bash
-$ . /etc/os-release
-$ docker commit \
-    --change='ENTRYPOINT ["nvidia-driver", "init"]' \
-    nvidia-driver ghcr.io/flatcar/driver:${DRIVER_VERSION}-flatcar${VERSION_ID}
-$ docker rm nvidia-driver
-```
-
-### Running the Driver Container
-
-Run the driver container with the tagged image from the previous step:
-
-```bash
-$ docker run -d --privileged --pid=host \
-     -v /run/nvidia:/run/nvidia:shared \
-     -v /tmp/nvidia:/var/log \
-     -v /usr/lib64/modules:/usr/lib64/modules \
-     ghcr.io/flatcar/driver:${DRIVER_VERSION}-flatcar${VERSION_ID}
-```
-
-The driver container will look for the precompiled modules and then use those if available. 
-The startup time of the container in this case would be reduced:
-
-```console
-...
 ========== NVIDIA Software Installer ==========
 Starting installation of NVIDIA driver version 595.71.05 for Linux kernel version 6.12.113-flatcar
 Stopping NVIDIA persistence daemon...
@@ -170,29 +117,19 @@ Unloading NVIDIA driver kernel modules...
 Unmounting NVIDIA driver rootfs...
 Checking NVIDIA driver packages...
 Found precompiled NVIDIA kernel modules for 6.12.113-flatcar
+Loading kernel module dependencies on the host...
 Installing precompiled NVIDIA driver kernel modules...
+Installing NVIDIA GSP firmware into /lib/firmware/nvidia/595.71.05...
 Mounting NVIDIA driver rootfs...
-Setting firmware search path to /run/nvidia/driver/lib/firmware
 Loading NVIDIA driver kernel modules...
 Starting NVIDIA persistence daemon...
 Done, now waiting for signal
 ```
 
-You can also verify that the NVIDIA kernel modules are loaded in the system:
-
-```bash
-$ lsmod | grep -i nvidia
-nvidia_modeset       1228800  0
-nvidia_uvm           1130496  0
-nvidia              34078720  17 nvidia_uvm,nvidia_modeset
-i2c_core               81920  3 nvidia,psmouse,i2c_piix4
-```
-
 ## Deploying the Precompiled Driver with the GPU Operator
 
-Instead of the manual Docker workflow above, a precompiled driver image can be built
-with the `build-precompiled-<driver-version>` Make target (e.g.
-`FLATCAR_VERSION=4593.2.0 make build-precompiled-580.167.08`) and deployed to a Kubernetes
+A precompiled driver image built with the `build-precompiled-<driver-version>` Make target (e.g.
+`FLATCAR_VERSION=4757.2.2 make build-precompiled-595.71.05`) can be deployed to a Kubernetes
 cluster using the [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) and Helm.
 
 ### Prerequisites
@@ -255,10 +192,10 @@ Notes:
    Installing precompiled NVIDIA driver kernel modules...
    ```
 
-   If you instead see `Installing the Flatcar kernel sources...` or
-   `Compiling NVIDIA driver kernel modules...`, the package did not match the running
-   kernel and the driver is being rebuilt from source (check that the node's Flatcar
-   version matches the image's `FLATCAR_VERSION`).
+   If the driver pod instead exits with `This image contains NVIDIA kernel modules for: ...`,
+   the node runs a different kernel build than the image was built for. Use the image matching
+   the node's Flatcar release, or the generic `<driver-version>-flatcar` image, which compiles
+   the modules at runtime.
 
 1. Confirm the driver is loaded:
 

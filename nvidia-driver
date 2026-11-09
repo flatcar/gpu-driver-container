@@ -9,8 +9,6 @@ DRIVER_VERSION=${DRIVER_VERSION:?"Missing driver version"}
 #NVIDIA_BINUITLS_DIR=/opt/nvidia/binutils
 #NVIDIA_KMODS_DIR=/opt/nvidia/${DRIVER_VERSION}
 GPU_DIRECT_RDMA_ENABLED=${GPU_DIRECT_RDMA_ENABLED:-false}
-CREATE_PRECOMPILED_PACKAGE=${CREATE_PRECOMPILED_PACKAGE:-false}
-
 
 KERNEL_MODULE_TYPE=${KERNEL_MODULE_TYPE:-auto}
 if [ "${KERNEL_MODULE_TYPE}" = "proprietary" ]; then
@@ -18,13 +16,8 @@ if [ "${KERNEL_MODULE_TYPE}" = "proprietary" ]; then
     exit 1
 fi
 KERNEL_TYPE=kernel-open
-# Outside the module source tree, since kbuild's clean removes all *.ko files below it.
+# Only present in precompiled images, one directory per kernel version.
 PRECOMPILED_DIR=/usr/src/nvidia-${DRIVER_VERSION}/precompiled
-MODULES=(nvidia nvidia-modeset nvidia-uvm nvidia-peermem)
-
-#export COREOS_RELEASE_CHANNEL=stable
-#COREOS_RELEASE_BOARD=amd64-usr
-#COREOS_ALL_RELEASES="https://www.flatcar-linux.org/releases-json/releases-${COREOS_RELEASE_CHANNEL}.json"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -77,7 +70,8 @@ _relocate_flatcar() {
 }
 
 _is_flatcar() {
-    nsenter -t 1 -m grep -q 'ID=flatcar' /etc/os-release
+    # os-release values may be quoted (ID="flatcar").
+    [ "$(nsenter -t 1 -m sh -c '. /etc/os-release && echo "${ID}"')" = "flatcar" ]
 }
 
 # Check if the system is NVSwitch based (e.g. HGX/DGX A100, H100, H200).
@@ -90,87 +84,6 @@ _assert_nvswitch_system() {
 }
 
 
-_fetch_flatcar_modules() {
-    local versionid=${1-}
-    if [ -z "$versionid" ]; then
-      versionid=$(. /host-etc/os-release; echo $VERSION_ID)
-    fi
-    local channel=
-    local board=
-    case "$versionid" in
-      *.2.*)
-        channel=stable;;
-      *.1.*)
-        channel=beta;;
-      *.0.*)
-        channel=alpha;;
-      *)
-        echo "Unsupported Flatcar VERSION_ID: ${versionid}" >&2
-        return 1;;
-    esac
-
-    case "$(uname -m)" in
-      x86_64)
-        board=amd64-usr;;
-      aarch64)
-        board=arm64-usr;;
-      *)
-        echo "Unsupported architecture: $(uname -m)" >&2
-        return 1;;
-    esac
-    echo "Installing the Flatcar kernel sources into the development environment..."
-
-    mkdir -p /host-lib
-    mkdir -p /lib/modules
-
-    local archive=/tmp/flatcar-container.tar.gz
-    curl --retry 3 -fL -o "${archive}" "https://${channel}.release.flatcar-linux.net/${board}/${versionid}/flatcar-container.tar.gz"
-    tar xf "${archive}" -C /lib/modules ./usr/lib/modules --strip-components 4
-    tar xf "${archive}" -C /host-lib ./usr/lib64 --exclude=./usr/lib64/misc/*
-    rm -f "${archive}"
-    KERNEL_VERSION="$(ls /lib/modules/)"
-
-    export FLATCAR_RELEASE_CHANNEL="${channel}"
-    export FLATCAR_RELEASE_BOARD="${board}"
-    export FLATCAR_RELEASE_VERSION_ID="${versionid}"
-}
-
-_extract_flatcar_proc_version() {
-    local versionid=${1:?Missing Flatcar version}
-    local channel=${2:?Missing Flatcar channel}
-    local board=${3:?Missing Flatcar board}
-    local image_path=/tmp/flatcar_production_image.vmlinuz
-    local banners_path=/tmp/flatcar_linux_banners
-    local proc_version_path=/lib/modules/${KERNEL_VERSION}/proc/version
-
-    curl --retry 3 -fsSL -o "${image_path}" \
-        "https://${channel}.release.flatcar-linux.net/${board}/${versionid}/flatcar_production_image.vmlinuz"
-
-    # Buffer all banner candidates into a file first: grep -m1 on the live
-    # pipeline would close the pipe early and kill extract-vmlinux/strings
-    # with SIGPIPE (pipefail is enabled by _relocate_flatcar).
-    extract-vmlinux "${image_path}" | strings | grep -E '^Linux version ' > "${banners_path}" || true
-    rm -f "${image_path}"
-
-    # The image embeds multiple "Linux version" strings. Only the real banner
-    # (identical to /proc/version on the booted host) carries a build number
-    # and timestamp, e.g. "... #1 SMP PREEMPT_DYNAMIC Mon Jun 15 08:27:43 -00 2026".
-    # A truncated template variant ("... # SMP PREEMPT_DYNAMIC ") appears first
-    # in the image and must be skipped, otherwise the packed proc version never
-    # matches at runtime and the driver is rebuilt from source.
-    if ! grep -m1 -E "^Linux version ${KERNEL_VERSION} .*#[0-9]+ SMP " "${banners_path}" > "${proc_version_path}"; then
-        grep -m1 -E '^Linux version .*#[0-9]+ SMP ' "${banners_path}" > "${proc_version_path}" || true
-    fi
-
-    if [ ! -s "${proc_version_path}" ]; then
-        echo "Could not derive Flatcar kernel version string from flatcar_production_image.vmlinuz" >&2
-        return 1
-    fi
-    rm -f "${banners_path}"
-
-    echo "Using Flatcar proc/version: $(cat "${proc_version_path}")"
-}
-
 _fetch_flatcar_modules_host() {
     mkdir -p /host-lib
     mkdir -p /lib/modules
@@ -179,84 +92,42 @@ _fetch_flatcar_modules_host() {
 }
 
 _install_prerequisites() {
-    if [ -n "${FLATCAR_VERSION}" ]; then
-      _fetch_flatcar_modules "${FLATCAR_VERSION}"
-    elif _is_flatcar; then
-      _fetch_flatcar_modules_host
-    else
-      _fetch_flatcar_modules
-    fi
-
-    rm -rf /usr/src/linux*
-    #rm -rf /host-lib
-    
-    # Gather the tag for the release matching the current kernel version.
-    #local kernel
-    #kernel=$(echo "${KERNEL_VERSION}" | cut -d "-" -f1)
-    #export COREOS_RELEASE_VERSION=$(curl -Ls "${COREOS_ALL_RELEASES}" | jq -r --arg kernel_ver "${kernel}" 'to_entries[] | select ((.value.major_software.kernel[0] == $kernel_ver) and (.key != "current")) | .key')
-
-    _relocate_flatcar
-
-    mkdir -p /lib/modules/${KERNEL_VERSION}/proc
-    if [ -n "${FLATCAR_VERSION}" ]; then
-        _extract_flatcar_proc_version "${FLATCAR_RELEASE_VERSION_ID}" "${FLATCAR_RELEASE_CHANNEL}" "${FLATCAR_RELEASE_BOARD}"
-    else
-        cp /proc/version /lib/modules/${KERNEL_VERSION}/proc
-    fi
-}
-
-# Check if precompiled modules exist for the exact kernel build (banner incl. build timestamp).
-_precompiled_matches() {
-    local proc_version=/proc/version
-    local pkg_dir=${PRECOMPILED_DIR}/${KERNEL_VERSION}
-
-    # Only targeted/offline builds match against the saved banner.
-    if [ -n "${FLATCAR_VERSION}" ] || [ "${KERNEL_VERSION}" != "$(uname -r)" ]; then
-        proc_version=/lib/modules/${KERNEL_VERSION}/proc/version
-    fi
-    # No cmp -s: it compares sizes first and /proc files report size 0.
-    [ -f "${pkg_dir}/proc-version" ] && cmp "${pkg_dir}/proc-version" "${proc_version}" > /dev/null 2>&1
-}
-
-# Check if the kernel version requires new precompiled driver modules.
-_kernel_requires_package() {
-    echo "Checking NVIDIA driver packages..."
-    if _precompiled_matches; then
-        echo "Found precompiled NVIDIA kernel modules for ${KERNEL_VERSION}"
+    if ! _is_flatcar; then
+        echo "Compiling the kernel modules is only supported on Flatcar Container Linux hosts" >&2
         return 1
     fi
-    return 0
+    echo "Copying the Flatcar kernel build tree from the host..."
+    _fetch_flatcar_modules_host
+    _relocate_flatcar
 }
 
-# Compile the kernel modules, optionally sign them, and store them for use later.
-_create_driver_package() {
-    if [ "${CREATE_PRECOMPILED_PACKAGE}" != "true" ]; then
-        return 0
+# Precompiled modules only fit the exact kernel build (banner incl. build timestamp).
+_precompiled_matches() {
+    # No cmp -s: it compares sizes first and /proc files report size 0.
+    [ -f "${PRECOMPILED_DIR}/${KERNEL_VERSION}/proc-version" ] &&
+        cmp "${PRECOMPILED_DIR}/${KERNEL_VERSION}/proc-version" /proc/version > /dev/null 2>&1
+}
+
+_install_precompiled_driver() {
+    local module_dir=/lib/modules/${KERNEL_VERSION}/kernel/drivers/video
+
+    echo "Checking NVIDIA driver packages..."
+    if ! _precompiled_matches; then
+        echo "This image contains NVIDIA kernel modules for: $(cat "${PRECOMPILED_DIR}"/*/proc-version 2>/dev/null)" >&2
+        echo "The running kernel is: $(cat /proc/version)" >&2
+        echo "Use the image matching this Flatcar release, or the generic ${DRIVER_VERSION}-flatcar image." >&2
+        return 1
     fi
+    echo "Found precompiled NVIDIA kernel modules for ${KERNEL_VERSION}"
 
-    local pkg_dir=${PRECOMPILED_DIR}/${KERNEL_VERSION}
+    # nvidia-modeset needs in-tree modules (video, backlight) that only exist on the host.
+    echo "Loading kernel module dependencies on the host..."
+    nsenter -t 1 -m modprobe -a video backlight
 
-    trap "make -s -j SYSSRC=/lib/modules/${KERNEL_VERSION}/build clean > /dev/null" EXIT
-    echo "Compiling NVIDIA driver kernel modules..."
-    cd "/usr/src/nvidia-${DRIVER_VERSION}/${KERNEL_TYPE}"
-
-    # Build complete modules with kbuild, so objtool and modfinal run as for in-tree modules.
-    export IGNORE_CC_MISMATCH=1
-    make -s -j$(nproc) SYSSRC=/lib/modules/${KERNEL_VERSION}/build modules > /dev/null
-
-    if [ -n "${PRIVATE_KEY}" ]; then
-        echo "Signing NVIDIA driver kernel modules..."
-        donkey get "${PRIVATE_KEY}" sh -c "PATH=${PATH}:/lib/modules/${KERNEL_VERSION}/build/scripts && \
-          for m in ${MODULES[*]}; do sign-file sha512 \$DONKEY_FILE pubkey.x509 \$m.ko || exit 1; done"
-    fi
-
-    echo "Storing precompiled NVIDIA kernel modules in ${pkg_dir}..."
-    rm -rf "${pkg_dir}"
-    mkdir -p "${pkg_dir}"
-    for m in "${MODULES[@]}"; do
-        cp "${m}.ko" "${pkg_dir}/"
-    done
-    cp "/lib/modules/${KERNEL_VERSION}/proc/version" "${pkg_dir}/proc-version"
+    echo "Installing precompiled NVIDIA driver kernel modules..."
+    mkdir -p "${module_dir}"
+    cp "${PRECOMPILED_DIR}/${KERNEL_VERSION}"/*.ko "${module_dir}/"
+    depmod "${KERNEL_VERSION}"
 }
 
 # The GPU Operator mounts a host directory over /lib/firmware, hiding the firmware shipped in the image.
@@ -364,26 +235,12 @@ _unload_driver() {
 _install_driver() {
     local install_args=()
 
-    rm -rf /lib/modules/${KERNEL_VERSION}/video
-
-    # nvidia-installer only accepts precompiled interfaces, not complete modules.
-    if _precompiled_matches; then
-        echo "Installing precompiled NVIDIA driver kernel modules..."
-        mkdir -p "/lib/modules/${KERNEL_VERSION}/kernel/drivers/video"
-        cp "${PRECOMPILED_DIR}/${KERNEL_VERSION}"/*.ko "/lib/modules/${KERNEL_VERSION}/kernel/drivers/video/"
-        depmod "${KERNEL_VERSION}"
-        return 0
-    fi
-
     echo "Installing NVIDIA driver kernel modules..."
     cd /usr/src/nvidia-${DRIVER_VERSION}
+    rm -rf /lib/modules/${KERNEL_VERSION}/video
 
     if [ "${ACCEPT_LICENSE}" = "yes" ]; then
         install_args+=("--accept-license")
-    fi
-    if [ "${KERNEL_VERSION}" != "$(uname -r)" ]; then
-        # Passing this arg prevents use of a precompiled package.
-        install_args+=(--kernel-name "${KERNEL_VERSION}")
     fi
     IGNORE_CC_MISMATCH=1 nvidia-installer --kernel-module-only --no-drm --ui=none --no-nouveau-check -m=${KERNEL_TYPE} ${install_args[@]+"${install_args[@]}"}
 }
@@ -454,12 +311,12 @@ init() {
     _unload_driver || exit 1
     _unmount_rootfs
 
-    if _kernel_requires_package; then
-        _install_prerequisites
-        _create_driver_package
+    if [ -d "${PRECOMPILED_DIR}" ]; then
+        _install_precompiled_driver || exit 1
+    else
+        _install_prerequisites || exit 1
+        _install_driver
     fi
-
-    _install_driver
     _install_firmware
     _mount_rootfs
     _load_driver
@@ -472,42 +329,12 @@ init() {
     exit 0
 }
 
-update() {
-    exec 3>&2
-    if exec 2> /dev/null 4< "${PID_FILE}"; then
-        if ! flock -n 4 && read -r pid <&4 && kill -0 "${pid}"; then
-            exec > >(tee -a "/proc/${pid}/fd/1")
-            exec 2> >(tee -a "/proc/${pid}/fd/2" >&3)
-        else
-            exec 2>&3
-        fi
-        exec 4>&-
-    fi
-    exec 3>&-
-
-    printf "\\n========== NVIDIA Software Updater ==========\\n"
-    printf "Starting update of NVIDIA driver version %s for Linux kernel version %s\\n" "${DRIVER_VERSION}" "${KERNEL_VERSION}"
-
-    trap "echo 'Caught signal'; exit 1" HUP INT QUIT PIPE TERM
-
-    CREATE_PRECOMPILED_PACKAGE=true
-    _install_prerequisites
-
-    if _kernel_requires_package; then
-        _create_driver_package
-    fi
-
-    echo "Done"
-    exit 0
-}
-
 usage() {
     cat >&2 <<EOF
 Usage: $0 COMMAND [ARG...]
 
 Commands:
   init   [-a | --accept-license]
-  update [-f | --flatcar VERSION_ID] [-k | --kernel VERSION] [-s | --sign KEYID]
 EOF
     exit 1
 }
@@ -518,7 +345,6 @@ fi
 command=$1; shift
 case "${command}" in
     init) options=$(getopt -l accept-license -o a -- "$@") ;;
-    update) options=$(getopt -l flatcar:,kernel:,sign: -o f:k:s: -- "$@") ;;
     *) usage ;;
 esac
 if [ $? -ne 0 ]; then
@@ -528,15 +354,10 @@ eval set -- "${options}"
 
 ACCEPT_LICENSE=""
 KERNEL_VERSION=$(uname -r)
-FLATCAR_VERSION=
-PRIVATE_KEY=""
 
 while true; do
     case "$1" in
     -a | --accept-license) ACCEPT_LICENSE="yes"; shift 1 ;;
-    -k | --kernel) KERNEL_VERSION=$2; shift 2 ;;
-    -f | --flatcar) FLATCAR_VERSION=$2; shift 2 ;;
-    -s | --sign) PRIVATE_KEY=$2; shift 2 ;;
     --) shift; break ;;
     *) usage ;;
     esac

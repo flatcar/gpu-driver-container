@@ -7,6 +7,11 @@ on:
         description: Space-separated Flatcar VERSION_ID values to import
         required: true
         default: "4757.2.2"
+  workflow_call:
+    inputs:
+      flatcar_versions:
+        type: string
+        required: true
 
 permissions:
   contents: read
