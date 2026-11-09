@@ -6,6 +6,8 @@ on:
       - "**"
     paths:
       - .github/workflows/image.yaml
+      - .github/workflows/devcontainer.yaml
+      - import-devcontainer.sh
       - Makefile
       - Dockerfile
       - nvidia-driver
@@ -22,7 +24,7 @@ on:
       flatcar_versions:
         description: Space-separated Flatcar VERSION_ID values (GPU Operator tag suffixes and precompiled builds)
         required: false
-        default: "4593.2.0 4593.2.1 4593.2.2 4593.2.3"
+        default: "4757.2.2 4757.2.3"
       build_precompiled:
         description: Also build precompiled driver images for each driver/Flatcar combination
         type: boolean
@@ -70,7 +72,7 @@ jobs:
           fi
           # Default to the driver versions maintained in the Makefile
           DRIVERS=$(sed -nE 's/^DRIVER_VERSIONS \?= *//p' Makefile)
-          FLATCARS="4593.2.0 4593.2.1 4593.2.2 4593.2.3"
+          FLATCARS="4757.2.2 4757.2.3"
           PRECOMPILED="true"
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             if [[ -n "${{ inputs.driver_versions }}" ]]; then
@@ -125,8 +127,15 @@ jobs:
               "${IMAGE_NAME}:${BASE_TAG}"
           done
 
-  precompiled-flatcar:
+  devcontainer:
     needs: setup
+    if: needs.setup.outputs.build_precompiled == 'true'
+    uses: ./.github/workflows/devcontainer.yaml
+    with:
+      flatcar_versions: ${{ needs.setup.outputs.flatcar_versions_plain }}
+
+  precompiled-flatcar:
+    needs: [setup, devcontainer]
     if: needs.setup.outputs.build_precompiled == 'true'
     runs-on: ubuntu-latest
     strategy:
@@ -155,5 +164,6 @@ jobs:
           VERSION="$VERSION" \
           DRIVER_VERSIONS="${{ matrix.driver_version }}" \
           FLATCAR_VERSION="${{ matrix.flatcar_version }}" \
+          DEVCONTAINER_IMAGE="ghcr.io/${{ github.repository_owner }}/flatcar-devcontainer:${{ matrix.flatcar_version }}" \
           PUSH_ON_BUILD=true \
           make build-precompiled-${{ matrix.driver_version }}
