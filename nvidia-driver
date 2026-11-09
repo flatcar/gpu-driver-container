@@ -123,9 +123,11 @@ _fetch_flatcar_modules() {
     mkdir -p /host-lib
     mkdir -p /lib/modules
 
-    curl --retry 3 -fLJO "https://${channel}.release.flatcar-linux.net/${board}/${versionid}/flatcar-container.tar.gz"
-    tar xf flatcar-container.tar.gz -C /lib/modules ./usr/lib/modules --strip-components 4
-    tar xf flatcar-container.tar.gz -C /host-lib ./usr/lib64 --exclude=./usr/lib64/misc/*
+    local archive=/tmp/flatcar-container.tar.gz
+    curl --retry 3 -fL -o "${archive}" "https://${channel}.release.flatcar-linux.net/${board}/${versionid}/flatcar-container.tar.gz"
+    tar xf "${archive}" -C /lib/modules ./usr/lib/modules --strip-components 4
+    tar xf "${archive}" -C /host-lib ./usr/lib64 --exclude=./usr/lib64/misc/*
+    rm -f "${archive}"
     KERNEL_VERSION="$(ls /lib/modules/)"
 
     export FLATCAR_RELEASE_CHANNEL="${channel}"
@@ -148,6 +150,7 @@ _extract_flatcar_proc_version() {
     # pipeline would close the pipe early and kill extract-vmlinux/strings
     # with SIGPIPE (pipefail is enabled by _relocate_flatcar).
     extract-vmlinux "${image_path}" | strings | grep -E '^Linux version ' > "${banners_path}" || true
+    rm -f "${image_path}"
 
     # The image embeds multiple "Linux version" strings. Only the real banner
     # (identical to /proc/version on the booted host) carries a build number
@@ -163,6 +166,7 @@ _extract_flatcar_proc_version() {
         echo "Could not derive Flatcar kernel version string from flatcar_production_image.vmlinuz" >&2
         return 1
     fi
+    rm -f "${banners_path}"
 
     echo "Using Flatcar proc/version: $(cat "${proc_version_path}")"
 }
