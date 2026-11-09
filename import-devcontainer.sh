@@ -20,6 +20,12 @@ case "${FLATCAR_VERSION}" in
     *) echo "Unsupported Flatcar version: ${FLATCAR_VERSION}" >&2; exit 1 ;;
 esac
 
+case "${BOARD}" in
+    amd64-usr) platform=linux/amd64 ;;
+    arm64-usr) platform=linux/arm64 ;;
+    *) echo "Unsupported board: ${BOARD}" >&2; exit 1 ;;
+esac
+
 url="https://${channel}.release.flatcar-linux.net/${BOARD}/${FLATCAR_VERSION}/flatcar_developer_container.bin.bz2"
 workdir=$(mktemp -d)
 trap 'rm -rf "${workdir}"' EXIT
@@ -53,6 +59,7 @@ docker run --rm --privileged -v "${workdir}:/work" "${HELPER_IMAGE}" bash -euo p
     tar --xattrs --xattrs-include="*" --numeric-owner -C /mnt/root -cf - .
     umount /mnt/root
 ' | docker import \
+        --platform "${platform}" \
         --change 'CMD ["/bin/bash"]' \
         --change "LABEL org.opencontainers.image.title=\"Flatcar developer container\"" \
         --change "LABEL org.opencontainers.image.version=\"${FLATCAR_VERSION}\"" \
