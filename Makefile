@@ -17,6 +17,8 @@ TAG_PREFIX = $(if $(VERSION),$(VERSION)-)
 PLATFORM ?= linux/amd64
 PUSH_ON_BUILD ?= false
 DOCKER_BUILD_OPTIONS ?= --output=type=image,push=$(PUSH_ON_BUILD)
+# Links the image to its repository on ghcr.io.
+SOURCE_URL ?= https://github.com/flatcar/gpu-driver-container
 # Set PULL= to build against a locally imported developer container.
 PULL ?= --pull
 
@@ -37,6 +39,7 @@ $(BUILD_TARGETS): build-%:
 		--platform=$(PLATFORM) \
 		--target generic \
 		--tag $(IMAGE_NAME):$(TAG_PREFIX)$*-flatcar \
+		--label org.opencontainers.image.source="$(SOURCE_URL)" \
 		--build-arg DRIVER_VERSION="$*" \
 		--build-arg CUDA_VERSION="$(CUDA_VERSION)" \
 		$(CURDIR)
@@ -52,6 +55,7 @@ $(PRECOMPILED_TARGETS): build-precompiled-%:
 		--platform=$(PLATFORM) \
 		--target precompiled \
 		--tag $(IMAGE_NAME):$(TAG_PREFIX)$*-flatcar$(FLATCAR_VERSION) \
+		--label org.opencontainers.image.source="$(SOURCE_URL)" \
 		--build-arg DRIVER_VERSION="$*" \
 		--build-arg CUDA_VERSION="$(CUDA_VERSION)" \
 		--build-arg FLATCAR_VERSION="$(FLATCAR_VERSION)" \
