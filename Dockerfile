@@ -126,8 +126,11 @@ RUN . /usr/share/flatcar/release && \
     fi && \
     KERNEL_VERSION=$(ls /usr/lib/modules) && \
     KERNEL_BUILD=/usr/lib/modules/${KERNEL_VERSION}/build && \
+    # Use the compiler the kernel was built with, e.g. x86_64-cros-linux-gnu-gcc or aarch64-cros-linux-gnu-gcc.
+    KERNEL_CC=$(sed -n 's/^CONFIG_CC_VERSION_TEXT="\([^ ]*\) .*/\1/p' "${KERNEL_BUILD}/.config") && \
+    command -v "${KERNEL_CC}" > /dev/null && \
     cd /tmp/kernel-open && \
-    make -s -j"$(nproc)" CC=x86_64-cros-linux-gnu-gcc SYSSRC="${KERNEL_BUILD}" modules > /dev/null && \
+    make -s -j"$(nproc)" CC="${KERNEL_CC}" SYSSRC="${KERNEL_BUILD}" modules > /dev/null && \
     mkdir -p "/out/${KERNEL_VERSION}" && \
     cp nvidia.ko nvidia-modeset.ko nvidia-uvm.ko nvidia-peermem.ko "/out/${KERNEL_VERSION}/" && \
     case "${FLATCAR_VERSION}" in *.2.*) channel=stable ;; *.1.*) channel=beta ;; *) channel=alpha ;; esac && \
