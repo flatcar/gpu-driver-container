@@ -117,6 +117,8 @@ FROM ${DEVCONTAINER_IMAGE} AS modules
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 ARG FLATCAR_VERSION
+# The image tag contains the kernel version, so it is passed in and verified here.
+ARG KERNEL_VERSION
 
 COPY --from=source /src/kernel-open /tmp/kernel-open
 
@@ -124,7 +126,9 @@ RUN . /usr/share/flatcar/release && \
     if [ "${FLATCAR_RELEASE_VERSION}" != "${FLATCAR_VERSION}" ]; then \
         echo "Developer container is ${FLATCAR_RELEASE_VERSION}, expected ${FLATCAR_VERSION}" >&2; exit 1; \
     fi && \
-    KERNEL_VERSION=$(ls /usr/lib/modules) && \
+    if [ "$(ls /usr/lib/modules)" != "${KERNEL_VERSION}" ]; then \
+        echo "Developer container has kernel $(ls /usr/lib/modules), expected ${KERNEL_VERSION}" >&2; exit 1; \
+    fi && \
     KERNEL_BUILD=/usr/lib/modules/${KERNEL_VERSION}/build && \
     # Use the compiler the kernel was built with, e.g. x86_64-cros-linux-gnu-gcc or aarch64-cros-linux-gnu-gcc.
     KERNEL_CC=$(sed -n 's/^CONFIG_CC_VERSION_TEXT="\([^ ]*\) .*/\1/p' "${KERNEL_BUILD}/.config") && \
