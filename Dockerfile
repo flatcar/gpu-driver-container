@@ -73,7 +73,9 @@ RUN --mount=type=bind,from=source,source=/src,target=/tmp/nvidia,rw \
                        --x-sysconfig-path=/tmp/null && \
     mkdir -p /usr/src/nvidia-$DRIVER_VERSION && \
     mv LICENSE kernel-open firmware /usr/src/nvidia-$DRIVER_VERSION && \
-    sed '9,${/^\(kernel-open\|firmware\|LICENSE\)/!d}' .manifest > /usr/src/nvidia-$DRIVER_VERSION/.manifest && \
+    # nvidia-installer consumes kernel-open/dkms.conf above; DKMS is not used.
+    sed -e '9,${/^\(kernel-open\|firmware\|LICENSE\)/!d}' -e '/^kernel-open\/dkms\.conf /d' \
+        .manifest > /usr/src/nvidia-$DRIVER_VERSION/.manifest && \
     find /tmp -mindepth 1 -maxdepth 1 ! -name nvidia -exec rm -rf {} +
 
 # Install fabric manager and NSCQ for NVSwitch based systems (e.g. HGX/DGX A100, H100, H200).
