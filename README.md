@@ -74,6 +74,8 @@ The `container-config` would have also created a `daemon.json` for Docker in `/e
 
 ## Building the Driver Images
 
+Maintainers publishing images for new Flatcar, NVIDIA driver or CUDA versions: see [RELEASING.md](RELEASING.md).
+
 The `Dockerfile` has two targets, both built with the Makefile:
 
 - **generic** (`<driver>-flatcar0`): compiles the NVIDIA open kernel modules at runtime against the

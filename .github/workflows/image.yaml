@@ -21,9 +21,9 @@ on:
         required: false
         default: ""
       flatcar_versions:
-        description: Space-separated Flatcar VERSION_ID values to build precompiled images for
+        description: Space-separated Flatcar VERSION_ID values to build precompiled images for (empty = use FLATCAR_VERSIONS from the Makefile)
         required: false
-        default: "4757.2.2 4757.2.3"
+        default: ""
       build_precompiled:
         description: Also build precompiled driver images for each driver/Flatcar combination
         type: boolean
@@ -40,7 +40,6 @@ permissions:
   packages: write
 
 env:
-  CUDA_VERSION: 13.2.1
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/driver
   SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
 
@@ -69,15 +68,17 @@ jobs:
           else
             echo "version=dev-${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
           fi
-          # Default to the driver versions maintained in the Makefile
+          # Default to the versions maintained in the Makefile
           DRIVERS=$(sed -nE 's/^DRIVER_VERSIONS \?= *//p' Makefile)
-          FLATCARS="4757.2.2 4757.2.3"
+          FLATCARS=$(sed -nE 's/^FLATCAR_VERSIONS \?= *//p' Makefile)
           PRECOMPILED="true"
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             if [[ -n "${{ inputs.driver_versions }}" ]]; then
               DRIVERS="${{ inputs.driver_versions }}"
             fi
-            FLATCARS="${{ inputs.flatcar_versions }}"
+            if [[ -n "${{ inputs.flatcar_versions }}" ]]; then
+              FLATCARS="${{ inputs.flatcar_versions }}"
+            fi
             PRECOMPILED="${{ inputs.build_precompiled }}"
           fi
           echo "Driver versions: $DRIVERS"

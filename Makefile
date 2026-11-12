@@ -3,6 +3,8 @@ DOCKER ?= docker
 # DRIVER_VERSIONS contains the latest version of each active datacenter branch.
 DRIVER_VERSIONS ?= 580.167.08 595.71.05
 CUDA_VERSION ?= 13.2.1
+# Flatcar releases CI builds precompiled images for (see RELEASING.md).
+FLATCAR_VERSIONS ?= 4757.2.2 4757.2.3
 
 REGISTRY ?= ghcr.io/flatcar
 IMAGE_NAME ?= $(REGISTRY)/driver
