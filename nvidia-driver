@@ -127,6 +127,10 @@ _install_precompiled_driver() {
     echo "Installing precompiled NVIDIA driver kernel modules..."
     mkdir -p "${module_dir}"
     cp "${PRECOMPILED_DIR}/${KERNEL_VERSION}"/*.ko "${module_dir}/"
+    # depmod expects these index files next to the modules; take them from the host.
+    for f in modules.order modules.builtin modules.builtin.modinfo; do
+        nsenter -t 1 -m cat "/lib/modules/${KERNEL_VERSION}/${f}" > "/lib/modules/${KERNEL_VERSION}/${f}"
+    done
     depmod "${KERNEL_VERSION}"
 }
 
