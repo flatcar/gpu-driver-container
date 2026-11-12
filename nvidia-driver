@@ -6,9 +6,6 @@ set -eu
 RUN_DIR=/run/nvidia
 PID_FILE=${RUN_DIR}/${0##*/}.pid
 DRIVER_VERSION=${DRIVER_VERSION:?"Missing driver version"}
-#NVIDIA_BINUITLS_DIR=/opt/nvidia/binutils
-#NVIDIA_KMODS_DIR=/opt/nvidia/${DRIVER_VERSION}
-GPU_DIRECT_RDMA_ENABLED=${GPU_DIRECT_RDMA_ENABLED:-false}
 
 KERNEL_MODULE_TYPE=${KERNEL_MODULE_TYPE:-auto}
 if [ "${KERNEL_MODULE_TYPE}" = "proprietary" ]; then
@@ -19,12 +16,8 @@ KERNEL_TYPE=kernel-open
 # Only present in precompiled images, one directory per kernel version.
 PRECOMPILED_DIR=/usr/src/nvidia-${DRIVER_VERSION}/precompiled
 
-export DEBIAN_FRONTEND=noninteractive
-
 _relocate_flatcar() {
     set -euo pipefail
-
-    #shopt -s nullglob
 
     hostlds=( /host-lib/usr/lib64/ld-linux-*.so.* )
     if [[ ${#hostlds[@]} -eq 0 ]]; then
