@@ -7,5 +7,5 @@ set -xeuo pipefail
 
 docker build --pull \
     --build-arg DRIVER_VERSION="${DRIVER_VERSION}" \
-    --tag "${IMAGE_NAME}:${DRIVER_VERSION}-flatcar" \
+    --tag "${IMAGE_NAME}:${DRIVER_VERSION}-flatcar0" \
     --file Dockerfile .

@@ -115,7 +115,7 @@ _install_precompiled_driver() {
     if ! _precompiled_matches; then
         echo "This image contains NVIDIA kernel modules for: $(cat "${PRECOMPILED_DIR}"/*/proc-version 2>/dev/null)" >&2
         echo "The running kernel is: $(cat /proc/version)" >&2
-        echo "Use the image matching this Flatcar release, or the generic ${DRIVER_VERSION}-flatcar image." >&2
+        echo "Use the precompiled image for this kernel, or the generic image (driver.usePrecompiled=false)." >&2
         return 1
     fi
     echo "Found precompiled NVIDIA kernel modules for ${KERNEL_VERSION}"

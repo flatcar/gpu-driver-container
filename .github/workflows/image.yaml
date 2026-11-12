@@ -22,7 +22,7 @@ on:
         required: false
         default: ""
       flatcar_versions:
-        description: Space-separated Flatcar VERSION_ID values (GPU Operator tag suffixes and precompiled builds)
+        description: Space-separated Flatcar VERSION_ID values to build precompiled images for
         required: false
         default: "4757.2.2 4757.2.3"
       build_precompiled:
@@ -31,7 +31,7 @@ on:
         required: false
         default: true
       release:
-        description: Tag images without a dev prefix (e.g. 580.167.08-flatcar4593.2.0) for use with plain driver.version values
+        description: Tag images without a dev prefix (e.g. 595-6.12.113-flatcar-flatcar0) for use with plain driver.version values
         type: boolean
         required: false
         default: false
@@ -63,8 +63,7 @@ jobs:
         run: |
           # Branch pushes build dev images with a unique commit-based prefix;
           # GitHub Releases (or a manual dispatch with release=true) build clean tags
-          # (<driver_version>-flatcar<version_id>) matching the GPU Operator's default
-          # image reference scheme.
+          # matching the GPU Operator's image reference scheme (see Makefile).
           if [[ "${{ github.event_name }}" == "release" ]] || \
              [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.release }}" == "true" ]]; then
             echo "version=" >> "$GITHUB_OUTPUT"
@@ -117,16 +116,6 @@ jobs:
           DRIVER_VERSIONS="${{ matrix.driver_version }}" \
           PUSH_ON_BUILD=true \
           make build-${{ matrix.driver_version }}
-
-      - name: Tag image for GPU Operator Flatcar suffix
-        run: |
-          BASE_TAG="${VERSION:+${VERSION}-}${{ matrix.driver_version }}-flatcar"
-          # Intentionally "-flatcar-flatcar<VERSION_ID>": the GPU Operator appends "-flatcar<VERSION_ID>" to driver.version.
-          for FLATCAR_VERSION in ${{ needs.setup.outputs.flatcar_versions_plain }}; do
-            docker buildx imagetools create \
-              -t "${IMAGE_NAME}:${BASE_TAG}-flatcar${FLATCAR_VERSION}" \
-              "${IMAGE_NAME}:${BASE_TAG}"
-          done
 
   devcontainer:
     needs: setup

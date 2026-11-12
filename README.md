@@ -76,13 +76,18 @@ The `container-config` would have also created a `daemon.json` for Docker in `/e
 
 The `Dockerfile` has two targets, both built with the Makefile:
 
-- **generic** (`<driver-version>-flatcar`): compiles the NVIDIA open kernel modules at runtime against the
+- **generic** (`<driver>-flatcar0`): compiles the NVIDIA open kernel modules at runtime against the
   kernel build tree of the running Flatcar host. Works on any Flatcar release, startup takes a few minutes.
-- **precompiled** (`<driver-version>-flatcar<VERSION_ID>`): the modules are built at image build time inside the
+- **precompiled** (`<driver>-<kernel>-flatcar0`, e.g. `595-6.12.113-flatcar-flatcar0`): the modules are built
+  at image build time inside the
   [Flatcar developer container](https://www.flatcar.org/docs/latest/devguide/kernel-modules/) of that release, i.e.
   with the exact compiler and kernel build tree Flatcar uses. The image contains no compiler or kernel sources and
   only starts on nodes running exactly that kernel build (`/proc/version`); on any other kernel it exits with an
-  error pointing to the generic image.
+  error.
+
+`<driver>` is both the driver branch (e.g. `595`) and the full driver version (e.g. `595.71.05`). Every Flatcar
+release ships a new kernel, so `<kernel>` identifies the Flatcar release, e.g. `6.12.113-flatcar` for 4757.2.2 and
+`6.12.114-flatcar` for 4757.2.3 (see `Linux` in the [release notes](https://www.flatcar.org/releases)).
 
 ```bash
 $ git clone https://github.com/flatcar/gpu-driver-container.git \
@@ -126,35 +131,52 @@ Starting NVIDIA persistence daemon...
 Done, now waiting for signal
 ```
 
-## Deploying the Precompiled Driver with the GPU Operator
+## Deploying the Driver with the GPU Operator
 
-A precompiled driver image built with the `build-precompiled-<driver-version>` Make target (e.g.
-`FLATCAR_VERSION=4757.2.2 make build-precompiled-595.71.05`) can be deployed to a Kubernetes
-cluster using the [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) and Helm.
-
-### Prerequisites
-
-- A Kubernetes cluster with Flatcar Container Linux GPU nodes. The node's Flatcar
-  `VERSION_ID` and kernel must match the precompiled image (e.g. `4593.2.0` /
-  `6.12.81-flatcar`).
-- `helm` v3 and `kubectl` with cluster-admin access.
-- A precompiled driver image published to a registry, e.g.
-  `ghcr.io/robinschneider/driver:flatcar-test-5b98d7b9-595.71.05-flatcar4593.2.0`.
+The images are deployed with the [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) and Helm.
 
 ### Image tag convention
 
 The GPU Operator composes the driver image reference as:
 
 ```
-<driver.repository>/<driver.image>:<driver.version>-<osTag>
+<driver.repository>/<driver.image>:<driver.version>-<osTag>                    # usePrecompiled=false
+<driver.repository>/<driver.image>:<driver.version>-<kernel-version>-<osTag>   # usePrecompiled=true
 ```
 
-where `osTag` is derived from the node's OS labels (`flatcar` + `VERSION_ID`, e.g.
-`flatcar4593.2.0`). For the image above, set
-`driver.version=flatcar-test-5b98d7b9-595.71.05` and the operator appends
-`-flatcar4593.2.0` automatically.
+`osTag` is `<ID><VERSION_ID>` of a GPU node, and the operator reads it from a single node for the whole cluster.
+With Flatcar's per-release `VERSION_ID` this picks the wrong image while nodes run different Flatcar releases, e.g.
+during updates ([NVIDIA/gpu-operator#1622](https://github.com/NVIDIA/gpu-operator/issues/1622)). Like
+[Garden Linux](https://github.com/gardenlinux/gardenlinux-nvidia-installer), a Node Feature Discovery rule therefore
+sets `VERSION_ID` to `0` on Flatcar nodes, which makes `osTag` the constant `flatcar0`. With `usePrecompiled=true`
+the operator creates one driver DaemonSet per kernel version, so each node gets the image for its Flatcar release.
 
 ### Installation
+
+```yaml
+# values.yaml
+driver:
+  repository: ghcr.io/flatcar
+  image: driver
+  version: "595"
+  usePrecompiled: true # false for the generic image
+  imagePullPolicy: Always
+toolkit:
+  installDir: /opt/nvidia-runtime
+node-feature-discovery:
+  worker:
+    config:
+      sources:
+        custom:
+          - name: flatcar-version
+            labelsTemplate: |
+              {{ range .system.osrelease }}feature.node.kubernetes.io/system-os_release.VERSION_ID=0
+              {{ end }}
+            matchFeatures:
+              - feature: system.osrelease
+                matchExpressions:
+                  ID: {op: In, value: ["flatcar"]}
+```
 
 ```bash
 helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
@@ -162,10 +184,7 @@ helm repo update
 
 helm install gpu-operator nvidia/gpu-operator \
   --namespace gpu-operator --create-namespace \
-  --set driver.repository=ghcr.io/robinschneider \
-  --set driver.image=driver \
-  --set driver.version=flatcar-test-5b98d7b9-595.71.05 \
-  --set toolkit.installDir=/opt/nvidia-runtime
+  --values values.yaml
 ```
 
 Notes:
@@ -173,6 +192,9 @@ Notes:
 - `toolkit.installDir=/opt/nvidia-runtime` is **required on Flatcar**: the default
   install path `/usr/local/nvidia` is on a read-only filesystem and the container
   toolkit pods will fail with `CreateContainerError` otherwise.
+- A precompiled image must exist for the kernel of every GPU node. Publish it before
+  updating nodes to a new Flatcar release; otherwise the driver pod stays in
+  `ImagePullBackOff` and has to be deleted once the image is available.
 - If the image is in a private registry, create a pull secret in the `gpu-operator`
   namespace and add `--set driver.imagePullSecrets[0]=<secret-name>`.
 
@@ -188,19 +210,18 @@ Notes:
    Expected output:
 
    ```
-   Found precompiled NVIDIA kernel modules for 6.12.81-flatcar
+   Found precompiled NVIDIA kernel modules for 6.12.113-flatcar
    Installing precompiled NVIDIA driver kernel modules...
    ```
 
    If the driver pod instead exits with `This image contains NVIDIA kernel modules for: ...`,
-   the node runs a different kernel build than the image was built for. Use the image matching
-   the node's Flatcar release, or the generic `<driver-version>-flatcar` image, which compiles
-   the modules at runtime.
+   the node runs a different kernel build than the image was built for.
 
 1. Confirm the driver is loaded:
 
    ```bash
-   kubectl -n gpu-operator exec ds/nvidia-driver-daemonset -- nvidia-smi
+   POD=$(kubectl -n gpu-operator get pods -l app=nvidia-driver-daemonset -o name | head -1)
+   kubectl -n gpu-operator exec "$POD" -- nvidia-smi
    ```
 
 1. On NVSwitch based systems (e.g. HGX H100 8-GPU), confirm the Fabric Manager started and the
@@ -210,7 +231,7 @@ Notes:
    kubectl -n gpu-operator logs -l app=nvidia-driver-daemonset | grep "fabric manager"
    # Starting NVIDIA fabric manager daemon...
 
-   kubectl -n gpu-operator exec ds/nvidia-driver-daemonset -- nvidia-smi -q | grep -A2 "^    Fabric"
+   kubectl -n gpu-operator exec "$POD" -- nvidia-smi -q | grep -A2 "^    Fabric"
    #     Fabric
    #         State  : Completed
    #         Status : Success
@@ -242,9 +263,13 @@ To roll out a newly built image without reinstalling:
 
 ```bash
 kubectl patch clusterpolicy cluster-policy --type merge \
-  -p '{"spec":{"driver":{"version":"flatcar-test-<sha8>-595.71.05"}}}'
+  -p '{"spec":{"driver":{"version":"<driver>"}}}'
 kubectl -n gpu-operator delete pods -l app=nvidia-driver-daemonset
 ```
+
+When enabling the NFD rule on an existing installation, the operator keeps the driver
+DaemonSets created for the previous `osTag` (e.g. `nvidia-driver-daemonset-<kernel>-flatcar4757.2.2`).
+Delete them once the nodes carry `feature.node.kubernetes.io/system-os_release.VERSION_ID=0`.
 
 ## Sample CUDA Workloads
 
