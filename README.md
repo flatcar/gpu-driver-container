@@ -19,7 +19,7 @@ https://kinvolk.io/docs/flatcar-container-linux/latest/installing/cloud/aws-ec2/
 ## Supported Drivers
 
 The following NVIDIA datacenter drivers have been tested with this container on Flatcar (kernel 6.12+):
-1. `580.159.04`
+1. `580.167.08`
 1. `595.71.05`
 
 Other datacenter driver versions from the [NVIDIA driver downloads](https://www.nvidia.com/en-us/drivers/) are expected to work as
