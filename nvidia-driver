@@ -191,6 +191,7 @@ _unload_driver() {
     local nvidia_refs=0
     local nvidia_uvm_refs=0
     local nvidia_modeset_refs=0
+    local nvidia_peermem_refs=0
 
     echo "Stopping NVIDIA persistence daemon..."
     _stop_daemon nvidia-persistenced /var/run/nvidia-persistenced/nvidia-persistenced.pid 10 || return 1
@@ -211,12 +212,18 @@ _unload_driver() {
         rmmod_args+=("nvidia-uvm")
         ((++nvidia_deps))
     fi
+    # Not loaded by this script, but holds a reference on nvidia if loaded on the host.
+    if [ -f /sys/module/nvidia_peermem/refcnt ]; then
+        nvidia_peermem_refs=$(< /sys/module/nvidia_peermem/refcnt)
+        rmmod_args+=("nvidia-peermem")
+        ((++nvidia_deps))
+    fi
     if [ -f /sys/module/nvidia/refcnt ]; then
         nvidia_refs=$(< /sys/module/nvidia/refcnt)
         rmmod_args+=("nvidia")
     fi
     if [ "${nvidia_refs}" -gt "${nvidia_deps}" ] || [ "${nvidia_uvm_refs}" -gt 0 ] ||                \
-            [ "${nvidia_modeset_refs}" -gt 0 ]; then
+            [ "${nvidia_modeset_refs}" -gt 0 ] || [ "${nvidia_peermem_refs}" -gt 0 ]; then
         echo "Could not unload NVIDIA driver kernel modules, driver is in use" >&2
         return 1
     fi
@@ -293,12 +300,13 @@ init() {
     printf "\\n========== NVIDIA Software Installer ==========\\n"
     printf "Starting installation of NVIDIA driver version %s for Linux kernel version %s\\n" "${DRIVER_VERSION}" "${KERNEL_VERSION}"
 
-    exec 3> "${PID_FILE}"
+    # Open without truncating: a second instance must not clear the PID of the running one.
+    exec 3>> "${PID_FILE}"
     if ! flock -n 3; then
         echo "An instance of the NVIDIA driver is already running, aborting"
         exit 1
     fi
-    echo $$ >&3
+    echo $$ > "${PID_FILE}"
 
     trap "echo 'Caught signal'; exit 1" HUP INT QUIT PIPE TERM
     trap "_shutdown" EXIT
@@ -340,6 +348,10 @@ fi
 command=$1; shift
 case "${command}" in
     init) options=$(getopt -l accept-license -o a -- "$@") ;;
+    # Used by the GPU Operator's peer memory sidecar and probes (driver.rdma.enabled=true).
+    reload_nvidia_peermem|probe_nvidia_peermem)
+        echo "GPUDirect RDMA (nvidia-peermem) is not supported, set driver.rdma.enabled=false" >&2
+        exit 1 ;;
     *) usage ;;
 esac
 if [ $? -ne 0 ]; then

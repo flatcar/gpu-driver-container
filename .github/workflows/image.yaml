@@ -58,12 +58,18 @@ jobs:
 
       - name: Compute build matrix
         id: vars
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_RELEASE: ${{ inputs.release }}
+          INPUT_DRIVER_VERSIONS: ${{ inputs.driver_versions }}
+          INPUT_FLATCAR_VERSIONS: ${{ inputs.flatcar_versions }}
+          INPUT_BUILD_PRECOMPILED: ${{ inputs.build_precompiled }}
         run: |
           # Branch pushes build dev images with a unique commit-based prefix;
           # GitHub Releases (or a manual dispatch with release=true) build clean tags
           # matching the GPU Operator's image reference scheme (see Makefile).
-          if [[ "${{ github.event_name }}" == "release" ]] || \
-             [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.release }}" == "true" ]]; then
+          if [[ "$EVENT_NAME" == "release" ]] || \
+             [[ "$EVENT_NAME" == "workflow_dispatch" && "$INPUT_RELEASE" == "true" ]]; then
             echo "version=" >> "$GITHUB_OUTPUT"
           else
             echo "version=dev-${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
@@ -72,15 +78,15 @@ jobs:
           DRIVERS=$(sed -nE 's/^DRIVER_VERSIONS \?= *//p' Makefile)
           FLATCARS=$(sed -nE 's/^FLATCAR_VERSIONS \?= *//p' Makefile)
           PRECOMPILED="true"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            if [[ -n "${{ inputs.driver_versions }}" ]]; then
-              DRIVERS="${{ inputs.driver_versions }}"
-            fi
-            if [[ -n "${{ inputs.flatcar_versions }}" ]]; then
-              FLATCARS="${{ inputs.flatcar_versions }}"
-            fi
-            PRECOMPILED="${{ inputs.build_precompiled }}"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            DRIVERS="${INPUT_DRIVER_VERSIONS:-$DRIVERS}"
+            FLATCARS="${INPUT_FLATCAR_VERSIONS:-$FLATCARS}"
+            PRECOMPILED="$INPUT_BUILD_PRECOMPILED"
           fi
+          # The versions end up in shell commands and image tags.
+          for v in $DRIVERS $FLATCARS; do
+            [[ "$v" =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "Invalid version: $v" >&2; exit 1; }
+          done
           echo "Driver versions: $DRIVERS"
           echo "driver_versions=$(echo "$DRIVERS" | jq -R -c 'split(" ") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
           echo "flatcar_versions=$(echo "$FLATCARS" | jq -R -c 'split(" ") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
@@ -111,11 +117,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Flatcar driver image
+        env:
+          DRIVER_VERSION: ${{ matrix.driver_version }}
         run: |
           VERSION="$VERSION" \
-          DRIVER_VERSIONS="${{ matrix.driver_version }}" \
+          DRIVER_VERSIONS="$DRIVER_VERSION" \
           PUSH_ON_BUILD=true \
-          make build-${{ matrix.driver_version }}
+          make "build-$DRIVER_VERSION"
 
   devcontainer:
     needs: setup
@@ -150,10 +158,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push precompiled Flatcar driver image
+        env:
+          DRIVER_VERSION: ${{ matrix.driver_version }}
+          FLATCAR_VERSION: ${{ matrix.flatcar_version }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           VERSION="$VERSION" \
-          DRIVER_VERSIONS="${{ matrix.driver_version }}" \
-          FLATCAR_VERSION="${{ matrix.flatcar_version }}" \
-          DEVCONTAINER_IMAGE="ghcr.io/${{ github.repository_owner }}/flatcar-devcontainer:${{ matrix.flatcar_version }}" \
+          DRIVER_VERSIONS="$DRIVER_VERSION" \
+          FLATCAR_VERSION="$FLATCAR_VERSION" \
+          DEVCONTAINER_IMAGE="ghcr.io/${OWNER}/flatcar-devcontainer:${FLATCAR_VERSION}" \
           PUSH_ON_BUILD=true \
-          make build-precompiled-${{ matrix.driver_version }}
+          make "build-precompiled-$DRIVER_VERSION"
