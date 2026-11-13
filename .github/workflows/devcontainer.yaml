@@ -31,6 +31,9 @@ jobs:
         env:
           FLATCAR_VERSIONS: ${{ inputs.flatcar_versions }}
         run: |
+          for v in $FLATCAR_VERSIONS; do
+            [[ "$v" =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "Invalid Flatcar version: $v" >&2; exit 1; }
+          done
           echo "flatcar_versions=$(echo "$FLATCAR_VERSIONS" | jq -R -c 'split(" ") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
 
   import:

@@ -32,6 +32,9 @@ Fabric Manager automatically when NVSwitch devices are detected (`/proc/driver/n
 on HGX H100 8-GPU systems. Note that NVLink5+ systems (e.g. GB200 NVL) additionally require the NVLink Subnet Manager, which is 
 not yet included.
 
+GPUDirect RDMA (`nvidia-peermem`) is not supported yet; keep the GPU Operator's `driver.rdma.enabled` at its default
+`false`.
+
 ## Getting Started
 
 Setup the NVIDIA Container Toolkit using the [container-config](https://gitlab.com/nvidia/container-toolkit/container-config) project:
