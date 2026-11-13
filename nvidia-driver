@@ -5,6 +5,8 @@ set -eu
 
 RUN_DIR=/run/nvidia
 PID_FILE=${RUN_DIR}/${0##*/}.pid
+# Separate from the PID file, which _shutdown and k8s-driver-manager remove.
+LOCK_FILE=${RUN_DIR}/${0##*/}.lock
 DRIVER_VERSION=${DRIVER_VERSION:?"Missing driver version"}
 
 KERNEL_MODULE_TYPE=${KERNEL_MODULE_TYPE:-auto}
@@ -300,8 +302,7 @@ init() {
     printf "\\n========== NVIDIA Software Installer ==========\\n"
     printf "Starting installation of NVIDIA driver version %s for Linux kernel version %s\\n" "${DRIVER_VERSION}" "${KERNEL_VERSION}"
 
-    # Open without truncating: a second instance must not clear the PID of the running one.
-    exec 3>> "${PID_FILE}"
+    exec 3>> "${LOCK_FILE}"
     if ! flock -n 3; then
         echo "An instance of the NVIDIA driver is already running, aborting"
         exit 1
