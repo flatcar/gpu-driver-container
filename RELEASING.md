@@ -33,13 +33,19 @@ Each image gets a tag for the driver branch and one for the full driver version:
 | generic | `595-flatcar0`, `595.71.05-flatcar0` |
 
 The kernel version in the tag (`6.12.113-flatcar`) is read from the Flatcar release
-(`flatcar_production_image_kernel_config.txt`); every Flatcar release ships a new kernel.
+(`flatcar_production_image_kernel_config.txt`).
 
 ## New Flatcar release
 
 Nodes running a Flatcar release without a precompiled image cannot start the driver (`ImagePullBackOff`), so publish
 the image **before** clusters update their nodes. New releases are listed at <https://www.flatcar.org/releases>
-(JSON feed: `https://www.flatcar.org/releases-json/releases-<channel>.json`).
+(JSON feed: `https://www.flatcar.org/releases-json/releases-stable.json`).
+
+Precompiled images are built for **stable** releases only. Releases of different channels, and occasionally two
+stable releases (e.g. 4152.2.0 and 4152.2.1), ship the same kernel version as separate builds. They would get the
+same image tag, and the modules only load on the exact kernel build they were compiled for. CI therefore rejects
+non-stable releases and two releases with the same kernel version in `FLATCAR_VERSIONS`; keep only the newer one.
+Nodes on the other release exit with a kernel mismatch error and can use the generic image until they are updated.
 
 1. Add the new `VERSION_ID` to `FLATCAR_VERSIONS` in the `Makefile`. Remove releases that are no longer in use;
    their published images stay in the registry.

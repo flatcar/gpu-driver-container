@@ -90,9 +90,11 @@ The `Dockerfile` has two targets, both built with the Makefile:
   only starts on nodes running exactly that kernel build (`/proc/version`); on any other kernel it exits with an
   error.
 
-`<driver>` is both the driver branch (e.g. `595`) and the full driver version (e.g. `595.71.05`). Every Flatcar
-release ships a new kernel, so `<kernel>` identifies the Flatcar release, e.g. `6.12.113-flatcar` for 4757.2.2 and
-`6.12.114-flatcar` for 4757.2.3 (see `Linux` in the [release notes](https://www.flatcar.org/releases)).
+`<driver>` is both the driver branch (e.g. `595`) and the full driver version (e.g. `595.71.05`). `<kernel>` is the
+kernel of the Flatcar release, e.g. `6.12.113-flatcar` for 4757.2.2 and `6.12.114-flatcar` for 4757.2.3 (see `Linux`
+in the [release notes](https://www.flatcar.org/releases)). Precompiled images are published for stable releases
+only, as releases of different channels can ship the same kernel version built differently; use the generic image
+on beta and alpha nodes.
 
 ```bash
 $ git clone https://github.com/flatcar/gpu-driver-container.git \
