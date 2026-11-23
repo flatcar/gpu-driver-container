@@ -1,0 +1,398 @@
+#! /bin/bash
+# Copyright (c) 2018-2021, NVIDIA CORPORATION. All rights reserved.
+
+set -euo pipefail
+
+RUN_DIR=/run/nvidia
+PID_FILE=${RUN_DIR}/${0##*/}.pid
+# Separate from the PID file, which _shutdown and k8s-driver-manager remove.
+LOCK_FILE=${RUN_DIR}/${0##*/}.lock
+DRIVER_VERSION=${DRIVER_VERSION:?"Missing driver version"}
+
+KERNEL_MODULE_TYPE=${KERNEL_MODULE_TYPE:-auto}
+if [ "${KERNEL_MODULE_TYPE}" = "proprietary" ]; then
+    echo "Proprietary kernel modules are not supported, only open kernel modules (Turing or newer GPUs)" >&2
+    exit 1
+fi
+KERNEL_TYPE=kernel-open
+# Only present in precompiled images, one directory per kernel version.
+PRECOMPILED_DIR=/usr/src/nvidia-${DRIVER_VERSION}/precompiled
+
+_relocate_flatcar() {
+    hostlds=( /host-lib/usr/lib64/ld-linux-*.so.* )
+    if [[ ${#hostlds[@]} -eq 0 ]]; then
+        echo "** no dynamic loaders found"
+        return 1
+    fi
+    if [[ ${#hostlds[@]} -gt 1 ]]; then
+        echo "** more than one fitting dynamic loader found, picking first"
+    fi
+    hostld=${hostlds[0]}
+    echo "** Found host dynamic loader: ${hostld}"
+
+    kdirs=( /lib/modules/${KERNEL_VERSION}/build )
+    if [[ ${#kdirs[@]} -eq 0 ]]; then
+        echo "** no kernel module tools directories found"
+        return 1
+    fi
+    if [[ ${#kdirs[@]} -gt 1 ]]; then
+        echo "** more than one fitting kernel module tools directory found, picking first"
+    fi
+    kdir=${kdirs[0]}
+    echo "** Found kernel tools directory: ${kdir}"
+
+    tools=(
+        scripts/basic/fixdep
+        scripts/mod/modpost
+        scripts/sign-file
+        tools/objtool/objtool
+    )
+
+    for tool in "${tools[@]}"; do
+        host_tool=${kdir}/${tool}
+        if [[ ! -f ${host_tool} ]]; then
+            echo "${tool@Q} not found in ${kdir@Q}, not patching"
+            continue
+        fi
+        echo "** Setting host dynamic loader for ${tool@Q}"
+        patchelf \
+            --set-interpreter "${hostld}" \
+            --set-rpath /host-lib/usr/lib64 \
+            "${host_tool}"
+    done
+}
+
+_is_flatcar() {
+    # os-release values may be quoted (ID="flatcar").
+    [ "$(nsenter -t 1 -m sh -c '. /etc/os-release && echo "${ID}"')" = "flatcar" ]
+}
+
+# Check if the system is NVSwitch based (e.g. HGX/DGX A100, H100, H200).
+_assert_nvswitch_system() {
+    [ -d /proc/driver/nvidia-nvswitch/devices ] || return 1
+    if [ -z "$(ls -A /proc/driver/nvidia-nvswitch/devices)" ]; then
+        return 1
+    fi
+    return 0
+}
+
+
+_fetch_flatcar_modules_host() {
+    mkdir -p /host-lib
+    mkdir -p /lib/modules
+    nsenter -t 1 -m tar cpf - /lib/modules/${KERNEL_VERSION} | tar xpf - -C /
+    nsenter -t 1 -m tar cpf - /usr/lib64/ | tar xpf - -C /host-lib/
+}
+
+_install_prerequisites() {
+    if ! _is_flatcar; then
+        echo "Compiling the kernel modules is only supported on Flatcar Container Linux hosts" >&2
+        return 1
+    fi
+    echo "Copying the Flatcar kernel build tree from the host..."
+    _fetch_flatcar_modules_host
+    _relocate_flatcar
+}
+
+# Precompiled modules only fit the exact kernel build (banner incl. build timestamp).
+_precompiled_matches() {
+    # No cmp -s: it compares sizes first and /proc files report size 0.
+    [ -f "${PRECOMPILED_DIR}/${KERNEL_VERSION}/proc-version" ] &&
+        cmp "${PRECOMPILED_DIR}/${KERNEL_VERSION}/proc-version" /proc/version > /dev/null 2>&1
+}
+
+_install_precompiled_driver() {
+    local module_dir=/lib/modules/${KERNEL_VERSION}/kernel/drivers/video
+
+    echo "Checking NVIDIA driver packages..."
+    if ! _precompiled_matches; then
+        echo "This image contains NVIDIA kernel modules for: $(cat "${PRECOMPILED_DIR}"/*/proc-version 2>/dev/null)" >&2
+        echo "The running kernel is: $(cat /proc/version)" >&2
+        echo "Use the precompiled image for this kernel, or the generic image (driver.usePrecompiled=false)." >&2
+        return 1
+    fi
+    echo "Found precompiled NVIDIA kernel modules for ${KERNEL_VERSION}"
+
+    # nvidia-modeset needs in-tree modules (video, backlight) that only exist on the host.
+    echo "Loading kernel module dependencies on the host..."
+    nsenter -t 1 -m modprobe -a video backlight
+
+    echo "Installing precompiled NVIDIA driver kernel modules..."
+    mkdir -p "${module_dir}"
+    cp "${PRECOMPILED_DIR}/${KERNEL_VERSION}"/*.ko "${module_dir}/"
+    # depmod expects these index files next to the modules; take them from the host.
+    for f in modules.order modules.builtin modules.builtin.modinfo; do
+        nsenter -t 1 -m cat "/lib/modules/${KERNEL_VERSION}/${f}" > "/lib/modules/${KERNEL_VERSION}/${f}"
+    done
+    depmod "${KERNEL_VERSION}"
+}
+
+# The GPU Operator mounts a host directory over /lib/firmware, hiding the firmware shipped in the image.
+_install_firmware() {
+    local fw_dir=/lib/firmware/nvidia/${DRIVER_VERSION}
+
+    echo "Installing NVIDIA GSP firmware into ${fw_dir}..."
+    mkdir -p "${fw_dir}"
+    cp -f /usr/src/nvidia-${DRIVER_VERSION}/firmware/*.bin "${fw_dir}/"
+}
+
+# Load the kernel modules and start persistenced.
+_load_driver() {
+    local fw_path_file=/sys/module/firmware_class/parameters/path
+    local fw_path="${RUN_DIR}/driver/lib/firmware"
+
+    # Open modules need the GSP firmware; the kernel looks it up in the host mount
+    # namespace, where the driver rootfs is mounted at ${RUN_DIR}/driver.
+    if [ -z "$(tr -d '[:space:]' < "${fw_path_file}")" ]; then
+        echo "Setting firmware search path to ${fw_path}"
+        echo -n "${fw_path}" > "${fw_path_file}"
+    elif [ "$(< "${fw_path_file}")" != "${fw_path}" ]; then
+        echo "WARNING: firmware search path already set to '$(< "${fw_path_file}")', keeping it"
+    fi
+
+    echo "Loading NVIDIA driver kernel modules..."
+    modprobe -a nvidia nvidia-uvm nvidia-modeset
+
+    echo "Starting NVIDIA persistence daemon..."
+    nvidia-persistenced --persistence-mode
+
+    if _assert_nvswitch_system; then
+        echo "Starting NVIDIA fabric manager daemon..."
+        nv-fabricmanager -c /usr/share/nvidia/nvswitch/fabricmanager.cfg
+    fi
+}
+
+# Stop a daemon via its PID file. The file may be stale (left by a previous container) and the
+# driver pod uses the host PID namespace, so only signal the PID if it still runs this daemon.
+_stop_daemon() {
+    local name=$1 pid_file=$2 tries=$3
+    local pid i
+
+    [ -f "${pid_file}" ] || return 0
+    pid=$(< "${pid_file}")
+    if [ "$(tr '\0' '\n' 2> /dev/null < "/proc/${pid}/cmdline" | head -n1 | xargs -r basename)" != "${name}" ]; then
+        rm -f "${pid_file}"
+        return 0
+    fi
+
+    kill -SIGTERM "${pid}"
+    for i in $(seq 1 "${tries}"); do
+        kill -0 "${pid}" 2> /dev/null || return 0
+        sleep 0.1
+    done
+    echo "Could not stop ${name}" >&2
+    return 1
+}
+
+# Stop persistenced and unload the kernel modules if they are currently loaded.
+_unload_driver() {
+    local rmmod_args=()
+    local nvidia_deps=0
+    local nvidia_refs=0
+    local nvidia_uvm_refs=0
+    local nvidia_modeset_refs=0
+    local nvidia_peermem_refs=0
+
+    echo "Stopping NVIDIA persistence daemon..."
+    _stop_daemon nvidia-persistenced /var/run/nvidia-persistenced/nvidia-persistenced.pid 10 || return 1
+
+    if [ -f /var/run/nvidia-fabricmanager/nv-fabricmanager.pid ]; then
+        echo "Stopping NVIDIA fabric manager daemon..."
+        _stop_daemon nv-fabricmanager /var/run/nvidia-fabricmanager/nv-fabricmanager.pid 50 || return 1
+    fi
+
+    echo "Unloading NVIDIA driver kernel modules..."
+    if [ -f /sys/module/nvidia_modeset/refcnt ]; then
+        nvidia_modeset_refs=$(< /sys/module/nvidia_modeset/refcnt)
+        rmmod_args+=("nvidia-modeset")
+        ((++nvidia_deps))
+    fi
+    if [ -f /sys/module/nvidia_uvm/refcnt ]; then
+        nvidia_uvm_refs=$(< /sys/module/nvidia_uvm/refcnt)
+        rmmod_args+=("nvidia-uvm")
+        ((++nvidia_deps))
+    fi
+    # Not loaded by this script, but holds a reference on nvidia if loaded on the host.
+    if [ -f /sys/module/nvidia_peermem/refcnt ]; then
+        nvidia_peermem_refs=$(< /sys/module/nvidia_peermem/refcnt)
+        rmmod_args+=("nvidia-peermem")
+        ((++nvidia_deps))
+    fi
+    if [ -f /sys/module/nvidia/refcnt ]; then
+        nvidia_refs=$(< /sys/module/nvidia/refcnt)
+        rmmod_args+=("nvidia")
+    fi
+    if [ "${nvidia_refs}" -gt "${nvidia_deps}" ] || [ "${nvidia_uvm_refs}" -gt 0 ] ||                \
+            [ "${nvidia_modeset_refs}" -gt 0 ] || [ "${nvidia_peermem_refs}" -gt 0 ]; then
+        echo "Could not unload NVIDIA driver kernel modules, driver is in use" >&2
+        return 1
+    fi
+
+    if [ ${#rmmod_args[@]} -gt 0 ]; then
+        rmmod "${rmmod_args[@]}" || return 1
+    fi
+    return 0
+}
+
+_install_driver() {
+    local install_args=()
+
+    echo "Installing NVIDIA driver kernel modules..."
+    cd /usr/src/nvidia-${DRIVER_VERSION}
+    rm -rf /lib/modules/${KERNEL_VERSION}/video
+
+    if [ "${ACCEPT_LICENSE}" = "yes" ]; then
+        install_args+=("--accept-license")
+    fi
+    IGNORE_CC_MISMATCH=1 nvidia-installer --kernel-module-only --no-drm --ui=none --no-nouveau-check -m=${KERNEL_TYPE} ${install_args[@]+"${install_args[@]}"}
+}
+
+# Execute binaries by root owning them first
+_exec() {
+        exec_bin_path=$(command -v "$1")
+        exec_user=$(stat -c "%u" "${exec_bin_path}")
+        exec_group=$(stat -c "%g" "${exec_bin_path}")
+        if [[ "${exec_user}" != "0" || "${exec_group}" != "0" ]]; then
+                chown 0:0 "${exec_bin_path}"
+                "$@"
+                chown "${exec_user}":"${exec_group}" "${exec_bin_path}"
+        else
+                "$@"
+        fi
+}
+
+# Mount the driver rootfs into the run directory with the exception of sysfs.
+_mount_rootfs() {
+    echo "Mounting NVIDIA driver rootfs..."
+    _exec mount --make-runbindable /sys
+    _exec mount --make-private /sys
+    mkdir -p ${RUN_DIR}/driver
+    _exec mount --rbind / ${RUN_DIR}/driver
+
+    echo "Check SELinux status"
+    if [ -e /sys/fs/selinux ]; then
+        echo "SELinux is enabled"
+        echo "Change device files security context for selinux compatibility"
+        chcon -R -t container_file_t ${RUN_DIR}/driver/dev
+    else
+        echo "SELinux is disabled, skipping..."
+    fi
+}
+
+# Unmount the driver rootfs from the run directory.
+_unmount_rootfs() {
+    echo "Unmounting NVIDIA driver rootfs..."
+    if findmnt -r -o TARGET | grep "${RUN_DIR}/driver" > /dev/null; then
+        _exec umount -l -R ${RUN_DIR}/driver
+    fi
+}
+
+# Checked by the GPU Operator's driver startup probe; a stale NotReady would block it.
+_set_daemons_status() {
+    mkdir -p "${RUN_DIR}/validations"
+    echo "$1" > "${RUN_DIR}/validations/.driver-daemons-status"
+}
+
+# Parameter files from the GPU Operator's driver.kernelModuleConfig, one per module.
+_configure_module_params() {
+    local module params
+
+    mkdir -p /etc/modprobe.d
+    for module in nvidia nvidia-uvm nvidia-modeset; do
+        [ -f "/drivers/${module}.conf" ] || continue
+        params=$(tr '\n' ' ' < "/drivers/${module}.conf")
+        echo "Module parameters for ${module}: ${params}"
+        echo "options ${module} ${params}" > "/etc/modprobe.d/${module}.conf"
+    done
+}
+
+_shutdown() {
+    if _unload_driver; then
+        _unmount_rootfs || return 1
+        rm -f "${PID_FILE}"
+        return 0
+    fi
+    return 1
+}
+
+init() {
+    printf "\\n========== NVIDIA Software Installer ==========\\n"
+    printf "Starting installation of NVIDIA driver version %s for Linux kernel version %s\\n" "${DRIVER_VERSION}" "${KERNEL_VERSION}"
+
+    exec 3>> "${LOCK_FILE}"
+    if ! flock -n 3; then
+        echo "An instance of the NVIDIA driver is already running, aborting"
+        exit 1
+    fi
+    echo $$ > "${PID_FILE}"
+
+    trap "echo 'Caught signal'; exit 1" HUP INT QUIT PIPE TERM
+    trap "_shutdown" EXIT
+
+    _set_daemons_status NotReady
+    _unload_driver || exit 1
+    _unmount_rootfs
+    _configure_module_params
+
+    # Called directly: on the left of || bash would disable errexit inside them.
+    if [ -d "${PRECOMPILED_DIR}" ]; then
+        _install_precompiled_driver
+    else
+        _install_prerequisites
+        _install_driver
+    fi
+    _install_firmware
+    _mount_rootfs
+    _load_driver
+    _set_daemons_status Ready
+
+    echo "Done, now waiting for signal"
+    sleep infinity &
+    trap "echo 'Caught signal'; _shutdown && { kill $!; exit 0; }" HUP INT QUIT PIPE TERM
+    trap - EXIT
+    while true; do wait $! || continue; done
+    exit 0
+}
+
+usage() {
+    cat >&2 <<EOF
+Usage: $0 COMMAND [ARG...]
+
+Commands:
+  init   [-a | --accept-license]
+EOF
+    exit 1
+}
+
+if [ $# -eq 0 ]; then
+    usage
+fi
+command=$1; shift
+case "${command}" in
+    init) options=$(getopt -l accept-license -o a -- "$@") ;;
+    # Used by the GPU Operator's peer memory sidecar and probes (driver.rdma.enabled=true).
+    reload_nvidia_peermem|probe_nvidia_peermem)
+        echo "GPUDirect RDMA (nvidia-peermem) is not supported, set driver.rdma.enabled=false" >&2
+        exit 1 ;;
+    *) usage ;;
+esac
+if [ $? -ne 0 ]; then
+    usage
+fi
+eval set -- "${options}"
+
+ACCEPT_LICENSE=""
+KERNEL_VERSION=$(uname -r)
+
+while true; do
+    case "$1" in
+    -a | --accept-license) ACCEPT_LICENSE="yes"; shift 1 ;;
+    --) shift; break ;;
+    *) usage ;;
+    esac
+done
+if [ $# -ne 0 ]; then
+    usage
+fi
+
+$command
