@@ -1,7 +1,7 @@
 #! /bin/bash
 # Copyright (c) 2018-2021, NVIDIA CORPORATION. All rights reserved.
 
-set -eu
+set -euo pipefail
 
 RUN_DIR=/run/nvidia
 PID_FILE=${RUN_DIR}/${0##*/}.pid
@@ -19,8 +19,6 @@ KERNEL_TYPE=kernel-open
 PRECOMPILED_DIR=/usr/src/nvidia-${DRIVER_VERSION}/precompiled
 
 _relocate_flatcar() {
-    set -euo pipefail
-
     hostlds=( /host-lib/usr/lib64/ld-linux-*.so.* )
     if [[ ${#hostlds[@]} -eq 0 ]]; then
         echo "** no dynamic loaders found"
@@ -315,10 +313,11 @@ init() {
     _unload_driver || exit 1
     _unmount_rootfs
 
+    # Called directly: on the left of || bash would disable errexit inside them.
     if [ -d "${PRECOMPILED_DIR}" ]; then
-        _install_precompiled_driver || exit 1
+        _install_precompiled_driver
     else
-        _install_prerequisites || exit 1
+        _install_prerequisites
         _install_driver
     fi
     _install_firmware
