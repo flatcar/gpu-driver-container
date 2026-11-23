@@ -287,9 +287,15 @@ _unmount_rootfs() {
     fi
 }
 
+# Checked by the GPU Operator's driver startup probe; a stale NotReady would block it.
+_set_daemons_status() {
+    mkdir -p "${RUN_DIR}/validations"
+    echo "$1" > "${RUN_DIR}/validations/.driver-daemons-status"
+}
+
 _shutdown() {
     if _unload_driver; then
-        _unmount_rootfs
+        _unmount_rootfs || return 1
         rm -f "${PID_FILE}"
         return 0
     fi
@@ -310,6 +316,7 @@ init() {
     trap "echo 'Caught signal'; exit 1" HUP INT QUIT PIPE TERM
     trap "_shutdown" EXIT
 
+    _set_daemons_status NotReady
     _unload_driver || exit 1
     _unmount_rootfs
 
@@ -323,6 +330,7 @@ init() {
     _install_firmware
     _mount_rootfs
     _load_driver
+    _set_daemons_status Ready
 
     echo "Done, now waiting for signal"
     sleep infinity &
